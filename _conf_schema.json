@@ -8,7 +8,7 @@
   "target_umo": {
     "description": "推送目标 UMO（可选，优先于 target_group）",
     "type": "string",
-    "hint": "AstrBot 会话唯一标识，形如 atri:GroupMessage:1092815819（平台实例名:消息类型:会话ID）。可在 WebUI/日志中获取，或用 /推送目标 本群 绑定当前会话。留空回退到 target_group。",
+    "hint": "AstrBot 会话唯一标识，形如 atri:GroupMessage:1092815819（平台实例名:消息类型:会话ID）。可在 WebUI/日志中获取，或用 /mc推送目标 本群 绑定当前会话。留空回退到 target_group。",
     "default": ""
   },
   "check_interval": {

@@ -1,6 +1,6 @@
 name: astrbot_plugin_mc_server_guard
 desc: "[AI 修改版] 基于 astrbot_plugin_minecraft_multi_monitor (xlyang / XiaolongYang-HZAU) 的 Minecraft 多服务器监控（SLP 本地直连）：上下线滞回确认、单服务器异常隔离、防僵尸监控任务、失联降频、UMO 动态推送目标（/推送目标）。"
-version: 1.0.0
+version: 1.0.1
 author: pengjinrui
 repo: "https://github.com/pengjinrui/astrbot_plugin_mc_server_guard"
 display_name: Minecraft 多服务器监控 (AI 修改版)

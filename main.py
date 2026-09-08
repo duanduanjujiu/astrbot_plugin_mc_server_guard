@@ -1,6 +1,11 @@
-"""AstrBot Minecraft 多服务器监控插件（本地修改版 v1.0.0）。
+"""AstrBot Minecraft 多服务器监控插件（AI 修改版 v1.0.1）。
 
-相对上游 0.1.0 的改动（与 TS3 插件 v3 同思路）：
+v1.0.1（本轮改动）：
+- 聊天指令全部加 ``mc`` 前缀，避免与 astrbot_plugin_ts3_server_guard 等插件的
+  同名指令冲突：``/mc查询``、``/mc推送目标``、``/mc推送测试``、
+  ``/mc_start_server_monitor``、``/mc_stop_server_monitor``、``/mc重置监控``。
+
+相对上游 0.1.0 的改动（v1.0.0，与 TS3 插件 v3 同思路）：
 - **上下线滞回判定**：单次 SLP 探测失败不再直接推“已离线”，需连续
   ``confirm_offline`` 次失败采样确认（恢复在线同理），避免抖动刷屏。
 - **单台服务器异常隔离**：任一台服务器轮询抛异常不会让整个监控循环退出
@@ -8,7 +13,7 @@
 - **生命周期竞态修复**：延迟自动启动任务被持有并在 terminate 取消，杜绝
   插件重载后残留僵尸 monitor 任务。
 - **失联降频**：服务器连续拉取失败后检测间隔自动退避到 60s。
-- **推送目标支持 UMO**：``/推送目标 <UMO|QQ群号|本群|清除>``、``/推送测试``，
+- **推送目标支持 UMO**：``/mc推送目标 <UMO|QQ群号|本群|清除>``、``/mc推送测试``，
   聊天下令设置持久化于 ``data/plugin_data/.../relay_state.json``，
   优先级高于 WebUI 面板的 ``target_umo`` / ``target_group``。
 - 发送优先走官方 ``context.send_message(umo, ...)``；UMO 为
@@ -60,7 +65,7 @@ def _command_rest(event: AstrMessageEvent) -> str:
     return parts[1].strip() if len(parts) > 1 else ""
 
 
-@register("astrbot_plugin_mc_server_guard", "pengjinrui", "Minecraft 多服务器监控插件", "1.0.0", repo="https://github.com/pengjinrui/astrbot_plugin_mc_server_guard")
+@register("astrbot_plugin_mc_server_guard", "pengjinrui", "Minecraft 多服务器监控插件", "1.0.1", repo="https://github.com/pengjinrui/astrbot_plugin_mc_server_guard")
 class MyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -342,7 +347,7 @@ class MyPlugin(Star):
     # 聊天命令
     # ------------------------------------------------------------------
 
-    @filter.command("start_server_monitor")
+    @filter.command("mc_start_server_monitor")
     async def start_server_monitor_task(self, event: AstrMessageEvent):
         if not self.servers:
             yield event.plain_result("❌ 当前没有启用的服务器配置，请先在 WebUI 中配置 server_entries")
@@ -365,7 +370,7 @@ class MyPlugin(Star):
         self.task.add_done_callback(self._on_monitor_task_done)
         yield event.plain_result(f"✅ 多服务器监控已启动，当前监控 {len(self.servers)} 台服务器")
 
-    @filter.command("stop_server_monitor")
+    @filter.command("mc_stop_server_monitor")
     async def stop_server_monitor_task(self, event: AstrMessageEvent):
         if self.task and not self.task.done():
             self.task.cancel()
@@ -377,7 +382,7 @@ class MyPlugin(Star):
         else:
             yield event.plain_result("❌ 当前没有正在运行的监控任务")
 
-    @filter.command("查询")
+    @filter.command("mc查询")
     async def query_server_status(self, event: AstrMessageEvent):
         text = await self.get_all_server_status_text()
         if self.settings.display_options.show_hitokoto:
@@ -386,14 +391,14 @@ class MyPlugin(Star):
                 text += f"\n\n💬 {hitokoto}"
         yield event.plain_result(text)
 
-    @filter.command("重置监控")
+    @filter.command("mc重置监控")
     async def reset_monitor(self, event: AstrMessageEvent):
         self.server_states = build_initial_states(self.servers)
         self.server_locks = {server.key: asyncio.Lock() for server in self.servers}
         yield event.plain_result("✅ 监控状态缓存已重置")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("推送目标")
+    @filter.command("mc推送目标")
     async def set_push_target(self, event: AstrMessageEvent):
         """查看 / 设置通知推送目标。支持输入 UMO 或 QQ 群号。"""
         rest = _command_rest(event)
@@ -419,7 +424,7 @@ class MyPlugin(Star):
             if not umo:
                 yield event.plain_result(
                     "❌ 无法获取当前会话的 UMO（该平台可能不支持主动消息），"
-                    "请改用 /推送目标 <UMO> 手动指定。"
+                    "请改用 /mc推送目标 <UMO> 手动指定。"
                 )
                 return
             save_runtime_target(umo=umo)
@@ -451,7 +456,7 @@ class MyPlugin(Star):
         )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("推送测试")
+    @filter.command("mc推送测试")
     async def push_test(self, event: AstrMessageEvent):
         """向当前推送目标发送一条测试消息。"""
         umo = self._effective_umo()
@@ -459,7 +464,7 @@ class MyPlugin(Star):
         if not umo and not group_id:
             yield event.plain_result(
                 "❌ 当前未配置推送目标。\n"
-                "请先使用 /推送目标 <UMO 或 QQ群号> 设置。"
+                "请先使用 /mc推送目标 <UMO 或 QQ群号> 设置。"
             )
             return
         final_message = (
@@ -479,12 +484,12 @@ class MyPlugin(Star):
     def _target_usage_text(self) -> str:
         return (
             "【用法】（管理员）\n"
-            "/推送目标 <UMO>        按 UMO 设置，例如：\n"
-            "                        /推送目标 atri:GroupMessage:1092815819\n"
-            "/推送目标 <QQ群号>     兼容旧版纯群号，例如：/推送目标 123456789\n"
-            "/推送目标 本群         把当前会话设为推送目标\n"
-            "/推送目标 清除         恢复使用 WebUI 面板配置\n"
-            "/推送测试             向当前目标发送测试消息"
+            "/mc推送目标 <UMO>        按 UMO 设置，例如：\n"
+            "                        /mc推送目标 atri:GroupMessage:1092815819\n"
+            "/mc推送目标 <QQ群号>     兼容旧版纯群号，例如：/mc推送目标 123456789\n"
+            "/mc推送目标 本群         把当前会话设为推送目标\n"
+            "/mc推送目标 清除         恢复使用 WebUI 面板配置\n"
+            "/mc推送测试             向当前目标发送测试消息"
         )
 
     def _target_help_text(self) -> str:

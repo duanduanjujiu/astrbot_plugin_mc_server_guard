@@ -40,7 +40,7 @@ def parse_umo(value) -> str | None:
     """校验并规范化 UMO 字符串（形如 ``<平台实例名>:<消息类型>:<会话ID>``）。
 
     例如 ``atri:GroupMessage:1092815819``。只做宽松结构校验，
-    可达性由 ``/推送目标`` 的测试消息验证。
+    可达性由 ``/mc推送目标`` 的测试消息验证。
     """
     if value is None:
         return None
