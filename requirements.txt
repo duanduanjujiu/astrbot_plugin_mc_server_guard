@@ -1,0 +1,15 @@
+# Minecraft 多服务器监控插件 运行依赖
+#
+# 升级 / 重建 AstrBot（例如更换 soulter/astrbot 镜像后）若依赖丢失，
+# 在 AstrBot 容器内执行一次：
+#   pip install -r /AstrBot/data/plugins/astrbot_plugin_mc_server_guard/requirements.txt
+# 或通过 AstrBot WebUI 重新安装 / 重载本插件触发自动安装。
+
+# aiohttp：HTTP 异步客户端。用于“一言”hitokoto 接口
+# （minecraft_multi_monitor/services.py）。
+aiohttp>=3.9,<4
+
+# dnspython：异步 DNS 解析。用于 Minecraft SRV 记录解析
+# （minecraft_multi_monitor/srv_resolver.py，import dns.asyncresolver），
+# 需要 >=2.0（asyncresolver 自 2.0 起提供）。
+dnspython>=2.0,<3

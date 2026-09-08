@@ -1,0 +1,137 @@
+{
+  "target_group": {
+    "description": "接收通知的QQ群号",
+    "type": "string",
+    "hint": "只支持一个群统一接收所有服务器通知，例如 123456789。留空时若下方 target_umo 有值则优先使用 UMO。",
+    "default": ""
+  },
+  "target_umo": {
+    "description": "推送目标 UMO（可选，优先于 target_group）",
+    "type": "string",
+    "hint": "AstrBot 会话唯一标识，形如 atri:GroupMessage:1092815819（平台实例名:消息类型:会话ID）。可在 WebUI/日志中获取，或用 /推送目标 本群 绑定当前会话。留空回退到 target_group。",
+    "default": ""
+  },
+  "check_interval": {
+    "description": "全局默认检测间隔（秒）",
+    "type": "int",
+    "hint": "当某台服务器未单独填写检测间隔时，使用这里的值。建议 30-60 秒。",
+    "default": 45
+  },
+  "enable_auto_monitor": {
+    "description": "插件加载后自动启动监控",
+    "type": "bool",
+    "default": true
+  },
+  "display_options": {
+    "description": "消息展示项开关",
+    "type": "object",
+    "hint": "控制手动查询和自动通知中显示哪些栏目。",
+    "items": {
+      "show_server_name": {
+        "description": "展示服务器名称",
+        "type": "bool",
+        "default": true
+      },
+      "show_server_address": {
+        "description": "展示服务器地址",
+        "type": "bool",
+        "default": false
+      },
+      "show_server_type": {
+        "description": "展示服务器类型",
+        "type": "bool",
+        "default": true
+      },
+      "show_game_version": {
+        "description": "展示游戏版本",
+        "type": "bool",
+        "default": false
+      },
+      "show_online_players": {
+        "description": "展示在线玩家数量",
+        "type": "bool",
+        "default": true
+      },
+      "show_motd": {
+        "description": "展示 MOTD",
+        "type": "bool",
+        "default": true
+      },
+      "show_player_list": {
+        "description": "展示当前在线玩家列表",
+        "type": "bool",
+        "default": false
+      },
+      "show_update_time": {
+        "description": "展示更新时间",
+        "type": "bool",
+        "default": true
+      },
+      "show_hitokoto": {
+        "description": "展示一言",
+        "type": "bool",
+        "default": false
+      }
+    },
+    "default": {
+      "show_server_name": true,
+      "show_server_address": false,
+      "show_server_type": true,
+      "show_game_version": false,
+      "show_online_players": true,
+      "show_motd": true,
+      "show_player_list": false,
+      "show_update_time": true,
+      "show_hitokoto": false
+    }
+  },
+  "server_entries": {
+    "description": "多服务器配置列表",
+    "type": "template_list",
+    "hint": "每一项是一台服务器。消息通知和查询结果会优先使用你填写的 server_name。",
+    "templates": {
+      "minecraft_server": {
+        "name": "服务器配置项",
+        "hint": "添加一台需要监控的 Minecraft 服务器。",
+        "items": {
+          "key": {
+            "description": "服务器唯一标识",
+            "type": "string",
+            "hint": "建议填写英文字母、数字或下划线，例如 survival_main。",
+            "default": ""
+          },
+          "enabled": {
+            "description": "启用该服务器监控",
+            "type": "bool",
+            "default": true
+          },
+          "server_name": {
+            "description": "服务器名称",
+            "type": "string",
+            "hint": "建议填写你希望在通知消息里展示的名称；留空时会优先回退到 key。",
+            "default": ""
+          },
+          "server_address": {
+            "description": "服务器地址",
+            "type": "string",
+            "hint": "一个输入框搞定所有格式：IP（如 192.168.1.10）、IP+端口（如 192.168.1.10:25566）、域名（如 play.example.com）、域名+端口（如 play.example.com:25566）、Minecraft SRV 记录名（以 _ 开头，如 _minecraft._tcp.play.example.com）。插件会自动识别：IP 直接使用；域名先解析 A 记录，失败则自动尝试 _minecraft._tcp.<domain> SRV 记录。未指定端口时默认 25565；SRV 记录的端口由 DNS 决定。",
+            "default": ""
+          },
+          "server_type": {
+            "description": "服务器类型",
+            "type": "string",
+            "hint": "填写 java 或 bedrock。",
+            "default": "java"
+          },
+          "check_interval": {
+            "description": "单服务器检测间隔（秒）",
+            "type": "int",
+            "hint": "填 0 或负数时将自动回退到全局默认值。",
+            "default": 45
+          }
+        }
+      }
+    },
+    "default": []
+  }
+}
