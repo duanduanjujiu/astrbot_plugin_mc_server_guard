@@ -2,7 +2,15 @@ import re
 
 from astrbot.api import AstrBotConfig, logger
 
-from .models import DisplayOptions, PluginSettings, ServerConfig, ServerState
+from .models import (
+    DEFAULT_CHECK_INTERVAL,
+    DEFAULT_ENABLE_AUTO_MONITOR,
+    MIN_CHECK_INTERVAL,
+    DisplayOptions,
+    PluginSettings,
+    ServerConfig,
+    ServerState,
+)
 
 
 DISPLAY_DEFAULTS = DisplayOptions()
@@ -11,7 +19,7 @@ DISPLAY_DEFAULTS = DisplayOptions()
 def safe_int(value, default: int) -> int:
     try:
         return int(value)
-    except Exception:
+    except (TypeError, ValueError):
         return default
 
 
@@ -40,7 +48,7 @@ def parse_umo(value) -> str | None:
     """校验并规范化 UMO 字符串（形如 ``<平台实例名>:<消息类型>:<会话ID>``）。
 
     例如 ``atri:GroupMessage:1092815819``。只做宽松结构校验，
-    可达性由 ``/mc推送目标`` 的测试消息验证。
+    可达性由 ``/mc_push_target`` 的测试消息验证。
     """
     if value is None:
         return None
@@ -83,14 +91,19 @@ def load_display_options(config: AstrBotConfig) -> DisplayOptions:
 
 
 def load_settings(config: AstrBotConfig) -> PluginSettings:
-    global_check_interval = safe_int(config.get("check_interval", 45), 45)
-    if global_check_interval < 5:
-        global_check_interval = 5
+    global_check_interval = safe_int(
+        config.get("check_interval"), DEFAULT_CHECK_INTERVAL
+    )
+    if global_check_interval < MIN_CHECK_INTERVAL:
+        global_check_interval = MIN_CHECK_INTERVAL
 
     return PluginSettings(
         target_group=parse_target_group(config.get("target_group")),
         target_umo=parse_umo(config.get("target_umo")),
-        enable_auto_monitor=safe_bool(config.get("enable_auto_monitor", False), False),
+        # 与 _conf_schema.json 的 default 保持一致：插件加载后默认自动启动监控。
+        enable_auto_monitor=safe_bool(
+            config.get("enable_auto_monitor"), DEFAULT_ENABLE_AUTO_MONITOR
+        ),
         global_check_interval=global_check_interval,
         display_options=load_display_options(config),
     )
@@ -100,14 +113,11 @@ def resolve_check_interval(value, global_check_interval: int) -> int:
     interval = safe_int(value, global_check_interval)
     if interval <= 0:
         return global_check_interval
-    return max(5, interval)
+    return max(MIN_CHECK_INTERVAL, interval)
 
 
 def load_servers_from_config(config: AstrBotConfig, global_check_interval: int) -> list[ServerConfig]:
-    raw_servers = config.get("server_entries")
-    if raw_servers is None:
-        raw_servers = config.get("servers", [])
-
+    raw_servers = config.get("server_entries", [])
     if not isinstance(raw_servers, list):
         logger.warning("配置项 server_entries 不是列表，已忽略。")
         raw_servers = []

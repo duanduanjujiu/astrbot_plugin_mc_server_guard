@@ -8,12 +8,12 @@
 
 ### 🔀 聊天指令加 mc 前缀（避免与 astrbot_plugin_ts3_server_guard 冲突）
 
-- `/查询` → `/mc查询`
-- `/推送目标` → `/mc推送目标`
-- `/推送测试` → `/mc推送测试`
+- `/查询` → `/mc_query`
+- `/推送目标` → `/mc_push_target`
+- `/推送测试` → `/mc_push_test`
 - `/start_server_monitor` → `/mc_start_server_monitor`
 - `/stop_server_monitor` → `/mc_stop_server_monitor`
-- `/重置监控` → `/mc重置监控`
+- `/重置监控` → `/mc_reset_monitor`
 - 旧指令名不再生效，请改用带前缀的新指令。
 
 ---
@@ -24,4 +24,4 @@
 
 - 本地 SLP / RAKNET 直连监控 Java/Bedrock 多服务器（沿用上游）
 - 上下线滞回确认、单服务器异常隔离、防僵尸监控任务、失联降频
-- 推送目标支持 UMO（`/mc推送目标 <UMO|QQ群号|本群>`、`/mc推送测试`）
+- 推送目标支持 UMO（`/mc_push_target <UMO|QQ群号|本群>`、`/mc_push_test`）

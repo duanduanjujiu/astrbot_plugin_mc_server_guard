@@ -1,6 +1,6 @@
 """运行时推送目标持久化。
 
-聊天下令（``/mc推送目标``）设置的推送目标需要跨插件重载 / 进程重启保留，
+聊天下令（``/mc_push_target``）设置的推送目标需要跨插件重载 / 进程重启保留，
 因此写入 ``data/plugin_data/astrbot_plugin_mc_server_guard/relay_state.json``。
 
 优先级（见 main.py）：

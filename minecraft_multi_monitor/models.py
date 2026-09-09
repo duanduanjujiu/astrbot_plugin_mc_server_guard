@@ -1,5 +1,17 @@
 from dataclasses import dataclass, field
 
+# ---------------------------------------------------------------------------
+# 默认值（与 _conf_schema.json 中的 default 字段保持一致）
+# 改这里即可同步到 config.py 加载逻辑与 schema 提示。
+# ---------------------------------------------------------------------------
+
+# 单服务器默认检测间隔（秒）。范围 [MIN_CHECK_INTERVAL, +∞)。
+DEFAULT_CHECK_INTERVAL = 45
+MIN_CHECK_INTERVAL = 5
+
+# 插件加载后是否默认自动启动监控（与 schema "enable_auto_monitor" default 对齐）
+DEFAULT_ENABLE_AUTO_MONITOR = True
+
 
 @dataclass(slots=True)
 class DisplayOptions:
