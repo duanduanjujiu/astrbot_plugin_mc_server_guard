@@ -67,7 +67,7 @@ def _command_rest(event: AstrMessageEvent) -> str:
 
 # `@register(...)` 在 AstrBot 4.x 中已 deprecated 但仍可用（详见 TS3 main.py 注释）。
 # 我们保留它作为向后兼容，并在 `metadata.yaml` 里维护权威元数据。
-@register("astrbot_plugin_mc_server_guard", "pengjinrui", "Minecraft 多服务器监控插件", "1.0.1", repo="https://github.com/pengjinrui/astrbot_plugin_mc_server_guard")
+@register("astrbot_plugin_mc_server_guard", "duanduanjujiu", "Minecraft 多服务器监控插件", "1.0.1", repo="https://github.com/duanduanjujiu/astrbot_plugin_mc_server_guard")
 class MyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)

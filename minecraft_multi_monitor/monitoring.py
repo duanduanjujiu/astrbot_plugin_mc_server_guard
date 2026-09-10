@@ -73,7 +73,7 @@ def format_server_info(snapshot: ServerSnapshot | None, display_options: Display
         lines.append(f"{status_emoji} 状态: {'在线' if snapshot.status == 'online' else '离线'}")
 
     if display_options.show_server_address:
-        # 优先展示主人填写的原值（如 mc.pengjinrui.top），fallback 到解析后的 IP:port
+        # 优先展示主人填写的原值（如 mc.example.com），fallback 到解析后的 IP:port
         addr = snapshot.server_address if snapshot.server_address else f"{snapshot.server_ip}:{snapshot.server_port}"
         lines.append(f"🌐 地址: {addr}")
 
