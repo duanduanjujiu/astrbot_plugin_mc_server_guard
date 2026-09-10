@@ -1,6 +1,6 @@
 [project]
 name = "astrbot_plugin_mc_server_guard"
-version = "1.0.1"
+version = "1.1.0"
 description = "Minecraft 多服务器监控插件（AI 修改版：本地 SLP / RAKNET 直连、滞回判定、UMO 推送）"
 requires-python = ">=3.10"
 dependencies = [
