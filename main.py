@@ -1,6 +1,19 @@
-"""AstrBot Minecraft 多服务器监控插件（AI 修改版 v1.0.1）。
+"""AstrBot Minecraft 多服务器监控插件（AI 修改版 v1.1.1）。
 
-v1.0.1（本轮改动）：
+v1.1.1（协议健壮性修复）：
+- 超时不再回退 Legacy Ping：Python 3.11+ 的 ``asyncio.TimeoutError`` 是
+  ``OSError`` 的子类，旧逻辑会把"服务器不可达"当成"该换协议"，导致离线服务器
+  单轮探测耗时翻倍（5s 超时 × 2 协议 × 2 重试）。
+- Legacy Ping 改为循环读取直到 EOF / 空闲超时，修复响应被拆成多个 TCP 段时
+  只读到半包、解析出错误玩家数与 MOTD 的问题。
+- 多台服务器改为并发探测（``asyncio.gather``），单台慢服务器不再拖累其他服务器。
+- SRV 解析后的 A 记录选择修正：真正按"IPv4 优先"返回，而不是固定返回第一条。
+- Bedrock 版未显式填写端口时默认 19132（旧逻辑固定 25565，导致基岩服连不上）。
+- 移除已废弃的 ``@register`` 装饰器（AstrBot 3.5.19+ 会自动识别 ``Star`` 子类，
+  元数据以 ``metadata.yaml`` 为准）。
+- 新增 ``tests/`` 单元测试（``python -m unittest discover -s tests -v``）。
+
+v1.0.1：
 - 聊天指令全部加 ``mc`` 前缀，避免与 astrbot_plugin_ts3_server_guard 等插件的
   同名指令冲突：``/mc_query``、``/mc_push_target``、``/mc_push_test``、
   ``/mc_start_server_monitor``、``/mc_stop_server_monitor``、``/mc_reset_monitor``。
@@ -25,10 +38,11 @@ v1.0.1（本轮改动）：
 import asyncio
 import os
 import sys
+from datetime import datetime
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if PLUGIN_DIR not in sys.path:
@@ -43,10 +57,10 @@ from minecraft_multi_monitor.config import (
 )
 from minecraft_multi_monitor.models import ServerConfig, ServerSnapshot, ServerState
 from minecraft_multi_monitor.monitoring import (
-    DEGRADE_AFTER_FAILURES,
-    DEGRADED_POLL_INTERVAL,
     DEFAULT_STATUS_CONFIRM_OFFLINE,
     DEFAULT_STATUS_CONFIRM_ONLINE,
+    DEGRADE_AFTER_FAILURES,
+    DEGRADED_POLL_INTERVAL,
     detect_changes,
     format_server_info,
 )
@@ -65,9 +79,8 @@ def _command_rest(event: AstrMessageEvent) -> str:
     return parts[1].strip() if len(parts) > 1 else ""
 
 
-# `@register(...)` 在 AstrBot 4.x 中已 deprecated 但仍可用（详见 TS3 main.py 注释）。
-# 我们保留它作为向后兼容，并在 `metadata.yaml` 里维护权威元数据。
-@register("astrbot_plugin_mc_server_guard", "duanduanjujiu", "Minecraft 多服务器监控插件", "1.1.0", repo="https://github.com/duanduanjujiu/astrbot_plugin_mc_server_guard")
+# AstrBot 3.5.19+ 会自动识别继承自 ``Star`` 的插件类，无需再使用已废弃的
+# ``@register`` 装饰器；插件元数据以 ``metadata.yaml`` 为准（见官方开发文档）。
 class MyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -84,9 +97,7 @@ class MyPlugin(Star):
         self._umo_override: str | None = runtime_target.umo
         self._group_override: str | None = runtime_target.group_id
 
-        self.servers = load_servers_from_config(
-            self.config, self.settings.global_check_interval
-        )
+        self.servers = load_servers_from_config(self.config, self.settings.global_check_interval)
         self.server_states = build_initial_states(self.servers)
         self.server_locks = {server.key: asyncio.Lock() for server in self.servers}
         self.status_client = build_status_client()
@@ -106,11 +117,7 @@ class MyPlugin(Star):
     async def terminate(self):
         """停止插件：取消延迟启动 + 主监控任务，避免残留僵尸协程。"""
         self._terminated = True
-        pending = [
-            t
-            for t in (self._delayed_start_task, self.task)
-            if t is not None and not t.done()
-        ]
+        pending = [t for t in (self._delayed_start_task, self.task) if t is not None and not t.done()]
         for t in pending:
             t.cancel()
         for t in pending:
@@ -133,9 +140,7 @@ class MyPlugin(Star):
         return self._group_override or self.settings.target_group or None
 
     def _target_desc(self) -> str:
-        return describe_target(
-            umo=self._effective_umo(), group_id=self._effective_group_id()
-        )
+        return describe_target(umo=self._effective_umo(), group_id=self._effective_group_id())
 
     # ------------------------------------------------------------------
     # 生命周期 / 自动启动
@@ -179,10 +184,6 @@ class MyPlugin(Star):
         服务器大概率已离线，因此这里直接构造一个 status="offline" 的 snapshot
         以便 detect_changes 能（在连续失败确认后）识别"在线 → 离线"的事件。
         """
-        from datetime import datetime
-
-        from minecraft_multi_monitor.models import ServerSnapshot
-
         lock = self.server_locks.setdefault(server.key, asyncio.Lock())
         async with lock:
             snapshot = await self.status_client.fetch_status(server, source)
@@ -232,23 +233,28 @@ class MyPlugin(Star):
                 await asyncio.sleep(1)
                 if not self.servers:
                     continue
-                for server in list(self.servers):
-                    state = self.server_states.setdefault(server.key, ServerState())
-                    try:
-                        await self._monitor_tick(server, state)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:
-                        # 单台服务器故障不影响其它服务器，也不让整个循环退出
-                        logger.error(
-                            f"[monitor] [{server.server_name}] 单服务器轮询异常: {exc!r}",
-                            exc_info=True,
-                        )
+                # 并发探测：单台服务器超时（最长约 10s）不再阻塞其他服务器的节拍。
+                # _safe_monitor_tick 内部已做异常隔离，gather 不会因单台故障中断。
+                await asyncio.gather(*(self._safe_monitor_tick(server) for server in list(self.servers)))
         except asyncio.CancelledError:
             logger.info("Minecraft 监控循环已取消")
             raise
         except Exception as exc:
             logger.error(f"Minecraft 监控循环异常: {exc!r}", exc_info=True)
+
+    async def _safe_monitor_tick(self, server: ServerConfig) -> None:
+        """执行单台服务器的一个检测节拍，吞掉非取消异常，避免影响其他服务器。"""
+        state = self.server_states.setdefault(server.key, ServerState())
+        try:
+            await self._monitor_tick(server, state)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # 单台服务器故障不影响其它服务器，也不让整个循环退出
+            logger.error(
+                f"[monitor] [{server.server_name}] 单服务器轮询异常: {exc!r}",
+                exc_info=True,
+            )
 
     async def _monitor_tick(self, server: ServerConfig, state: ServerState) -> None:
         """单台服务器的一个检测节拍。"""
@@ -306,23 +312,17 @@ class MyPlugin(Star):
 
         sent = await self._send_notification(final_message)
         if not sent:
-            logger.error(
-                f"[monitor] [{server.server_name}] 状态变化已识别，但通知发送失败"
-            )
+            logger.error(f"[monitor] [{server.server_name}] 状态变化已识别，但通知发送失败")
 
     async def _send_notification(self, final_text: str) -> bool:
         umo = self._effective_umo()
         group_id = self._effective_group_id()
         sent = await notify(self.context, final_text, umo=umo, group_id=group_id)
         if not sent:
-            logger.error(
-                f"通知发送失败，当前推送目标: {describe_target(umo=umo, group_id=group_id)}"
-            )
+            logger.error(f"通知发送失败，当前推送目标: {describe_target(umo=umo, group_id=group_id)}")
         return sent
 
-    async def _send_test(
-        self, *, umo: str | None, group_id: str | None, cause: str
-    ) -> str:
+    async def _send_test(self, *, umo: str | None, group_id: str | None, cause: str) -> str:
         """设置目标后立即发一条测试消息，返回给用户看的回执文本。"""
         if umo:
             dest = f"UMO: {umo}"
@@ -331,10 +331,7 @@ class MyPlugin(Star):
         else:
             return "❌ 目标为空，设置失败。"
         final_message = (
-            "🔔 Minecraft 监控插件推送测试\n"
-            f"推送目标已设置（来源：{cause}）。\n"
-            f"当前目标: {dest}\n"
-            "这是一条测试消息。"
+            f"🔔 Minecraft 监控插件推送测试\n推送目标已设置（来源：{cause}）。\n当前目标: {dest}\n这是一条测试消息。"
         )
         sent = await self._send_notification(final_message)
         if sent:
@@ -417,9 +414,7 @@ class MyPlugin(Star):
         self.server_locks = {server.key: asyncio.Lock() for server in self.servers}
 
         if was_running:
-            yield event.plain_result(
-                "✅ 监控状态缓存已重置（监控任务已暂停，使用 /mc_start_server_monitor 重启）"
-            )
+            yield event.plain_result("✅ 监控状态缓存已重置（监控任务已暂停，使用 /mc_start_server_monitor 重启）")
         else:
             yield event.plain_result("✅ 监控状态缓存已重置")
 
@@ -449,8 +444,7 @@ class MyPlugin(Star):
             umo = (getattr(event, "unified_msg_origin", None) or "").strip()
             if not umo:
                 yield event.plain_result(
-                    "❌ 无法获取当前会话的 UMO（该平台可能不支持主动消息），"
-                    "请改用 /mc_push_target <UMO> 手动指定。"
+                    "❌ 无法获取当前会话的 UMO（该平台可能不支持主动消息），请改用 /mc_push_target <UMO> 手动指定。"
                 )
                 return
             save_runtime_target(umo=umo)
@@ -477,9 +471,7 @@ class MyPlugin(Star):
             yield event.plain_result(reply)
             return
 
-        yield event.plain_result(
-            "❌ 无法识别的参数。\n\n" + self._target_usage_text()
-        )
+        yield event.plain_result("❌ 无法识别的参数。\n\n" + self._target_usage_text())
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("mc_push_test")
@@ -488,23 +480,15 @@ class MyPlugin(Star):
         umo = self._effective_umo()
         group_id = self._effective_group_id()
         if not umo and not group_id:
-            yield event.plain_result(
-                "❌ 当前未配置推送目标。\n"
-                "请先使用 /mc_push_target <UMO 或 QQ群号> 设置。"
-            )
+            yield event.plain_result("❌ 当前未配置推送目标。\n请先使用 /mc_push_target <UMO 或 QQ群号> 设置。")
             return
-        final_message = (
-            "🔔 Minecraft 监控插件推送测试\n"
-            "这是一条测试消息。\n"
-            f"当前推送目标: {self._target_desc()}"
-        )
+        final_message = f"🔔 Minecraft 监控插件推送测试\n这是一条测试消息。\n当前推送目标: {self._target_desc()}"
         sent = await self._send_notification(final_message)
         if sent:
             yield event.plain_result("✅ 测试消息已发送，请到目标会话查收。")
         else:
             yield event.plain_result(
-                "❌ 测试消息发送失败（请查看 AstrBot 日志）。\n"
-                f"当前推送目标: {self._target_desc()}"
+                f"❌ 测试消息发送失败（请查看 AstrBot 日志）。\n当前推送目标: {self._target_desc()}"
             )
 
     def _target_usage_text(self) -> str:
@@ -519,10 +503,7 @@ class MyPlugin(Star):
         )
 
     def _target_help_text(self) -> str:
-        return (
-            f"当前生效推送目标: {self._target_desc()}\n\n"
-            + self._target_usage_text()
-        )
+        return f"当前生效推送目标: {self._target_desc()}\n\n" + self._target_usage_text()
 
 
 __all__ = ["MyPlugin"]

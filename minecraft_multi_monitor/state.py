@@ -68,9 +68,7 @@ def load_runtime_target() -> RuntimeTarget:
     if path is None or not path.exists():
         return RuntimeTarget()
     try:
-        payload: dict[str, Any] = json.loads(
-            path.read_text(encoding="utf-8")
-        )
+        payload: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning(f"读取运行时推送目标失败({path}): {exc}")
         return RuntimeTarget()
@@ -78,11 +76,7 @@ def load_runtime_target() -> RuntimeTarget:
     group_id = payload.get("group_id")
     return RuntimeTarget(
         umo=str(umo).strip() if isinstance(umo, str) and umo.strip() else None,
-        group_id=(
-            str(group_id).strip()
-            if isinstance(group_id, str) and group_id.strip().isdigit()
-            else None
-        ),
+        group_id=(str(group_id).strip() if isinstance(group_id, str) and group_id.strip().isdigit() else None),
     )
 
 
@@ -101,9 +95,7 @@ def save_runtime_target(*, umo: str | None = None, group_id: str | None = None) 
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(path.parent), prefix=".relay_state.", suffix=".tmp"
-        )
+        fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".relay_state.", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, ensure_ascii=False, indent=2)

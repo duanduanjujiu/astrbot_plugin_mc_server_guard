@@ -19,7 +19,6 @@ from astrbot.api import logger
 
 from .models import ServerConfig, ServerSnapshot
 
-
 # 默认超时（秒）。原远程客户端的查询超时普遍为 15-25 秒，本地直连应更短。
 DEFAULT_TIMEOUT = 5.0
 
@@ -34,10 +33,17 @@ SLP_PROTOCOL_VERSION = 763
 RETRY_COUNT = 2
 RETRY_BACKOFF = 0.3
 
+# 单次查询的 SLP 状态响应体上限（字节）。服务端上报的 VarInt 长度不可信，
+# 超过上限直接判定为异常响应，避免为异常/恶意服务端分配超大内存。
+MAX_STATUS_PACKET_BYTES = 2 * 1024 * 1024
+
+# Legacy Ping 响应的读取上限（字节）与空闲读取超时（秒）。
+# 响应可能被拆成多个 TCP 段（慢链路 / 代理），读取时按"空闲"而非"整包"计时。
+MAX_LEGACY_PAYLOAD_BYTES = 65536
+LEGACY_IDLE_TIMEOUT = 2.0
+
 # 用于 Bedrock RAKNET Unconnected Ping 的 magic 字节序列。
-RAKNET_MAGIC = bytes.fromhex(
-    "00ffff00fefefefefdfdfdfd12345678"
-)
+RAKNET_MAGIC = bytes.fromhex("00ffff00fefefefefdfdfdfd12345678")
 
 
 def _now_text() -> str:
@@ -57,12 +63,7 @@ def _normalize_player_names(player_list: Any) -> list[str]:
     names: list[str] = []
     for player in player_list:
         if isinstance(player, dict):
-            name = (
-                player.get("name_clean")
-                or player.get("name")
-                or player.get("username")
-                or "未知玩家"
-            )
+            name = player.get("name_clean") or player.get("name") or player.get("username") or "未知玩家"
             names.append(_strip_mc_color_codes(str(name)))
         else:
             names.append(_strip_mc_color_codes(str(player)))
@@ -172,11 +173,7 @@ def _parse_legacy_payload(payload: bytes) -> tuple[str, str, str, int, int]:
 
     if len(tokens) < 2:
         # 极少数 Beta 1.8 - 1.3 风格：以 § 分隔、无 \x00
-        beta_tokens = [
-            _clean_token(tok)
-            for tok in re.split(r"§+", text)
-            if tok and re.search(r"[0-9A-Za-z]", tok)
-        ]
+        beta_tokens = [_clean_token(tok) for tok in re.split(r"§+", text) if tok and re.search(r"[0-9A-Za-z]", tok)]
         if beta_tokens:
             tokens = beta_tokens
 
@@ -200,21 +197,17 @@ def _parse_legacy_payload(payload: bytes) -> tuple[str, str, str, int, int]:
             version_idx = i
             break
     if version_idx is None:
-        first_non_num = next(
-            (i for i, tok in enumerate(tokens) if not _is_int(tok)), None
-        )
+        first_non_num = next((i for i, tok in enumerate(tokens) if not _is_int(tok)), None)
         if first_non_num is not None:
             version_idx = first_non_num
     version_name = tokens[version_idx] if version_idx is not None else "未知版本"
 
     # MOTD：版本号之后、online 数字之前的所有内容
     online_idx = (
-        numeric_indices[-2]
-        if len(numeric_indices) >= 2
-        else (numeric_indices[0] if numeric_indices else len(tokens))
+        numeric_indices[-2] if len(numeric_indices) >= 2 else (numeric_indices[0] if numeric_indices else len(tokens))
     )
     if version_idx is not None and version_idx + 1 < online_idx:
-        motd = "".join(tokens[version_idx + 1:online_idx]).strip()
+        motd = "".join(tokens[version_idx + 1 : online_idx]).strip()
     else:
         motd = ""
 
@@ -316,13 +309,13 @@ class LocalStatusClient:
         # 通过 server_address 解析出真实 (ip, port)
         target_host = server.server_ip
         target_port = server.server_port
-        used_srv = False
 
         # 优先用 server_address（用户填的统一地址）；兼容旧版只用 server_ip 的情况
         address_to_resolve = (server.server_address or "").strip()
         if address_to_resolve:
             try:
                 from .srv_resolver import resolve_server_target
+
                 ip, port, srv_flag = await resolve_server_target(
                     address_to_resolve,
                     fallback_port=server.server_port,
@@ -331,16 +324,13 @@ class LocalStatusClient:
                 if ip:
                     target_host = ip
                     target_port = port
-                    used_srv = srv_flag
                     if srv_flag:
                         logger.debug(
-                            f"[{source}] [{server.server_name}] SRV 解析成功: "
-                            f"{address_to_resolve} → {ip}:{port}"
+                            f"[{source}] [{server.server_name}] SRV 解析成功: {address_to_resolve} → {ip}:{port}"
                         )
                     elif address_to_resolve != ip:
                         logger.debug(
-                            f"[{source}] [{server.server_name}] 主机名解析: "
-                            f"{address_to_resolve} → {ip}:{port}"
+                            f"[{source}] [{server.server_name}] 主机名解析: {address_to_resolve} → {ip}:{port}"
                         )
                 else:
                     # 解析失败：仅在 server_ip 非空时回退，否则直接返回 None
@@ -358,14 +348,12 @@ class LocalStatusClient:
                         )
                         return None
             except Exception as exc:
-                logger.warning(
-                    f"[{source}] [{server.server_name}] 解析异常: {exc}，"
-                    f"回退到配置的 server_ip:server_port"
-                )
+                logger.warning(f"[{source}] [{server.server_name}] 解析异常: {exc}，回退到配置的 server_ip:server_port")
         elif server.server_ip and not _is_ip_literal(server.server_ip):
             # 旧版配置只有 server_ip，可能是域名，尝试解析
             try:
                 from .srv_resolver import resolve_server_target
+
                 ip, port, _ = await resolve_server_target(
                     server.server_ip,
                     fallback_port=server.server_port,
@@ -400,28 +388,19 @@ class LocalStatusClient:
             except asyncio.TimeoutError:
                 last_error = asyncio.TimeoutError("query timeout")
                 logger.warning(
-                    f"[{source}] [{server.server_name}] 本地查询超时 "
-                    f"({self.timeout}s, 尝试 {attempt}/{RETRY_COUNT})"
+                    f"[{source}] [{server.server_name}] 本地查询超时 ({self.timeout}s, 尝试 {attempt}/{RETRY_COUNT})"
                 )
             except (ConnectionRefusedError, OSError) as exc:
                 last_error = exc
-                logger.warning(
-                    f"[{source}] [{server.server_name}] 本地连接失败: {exc} "
-                    f"(尝试 {attempt}/{RETRY_COUNT})"
-                )
+                logger.warning(f"[{source}] [{server.server_name}] 本地连接失败: {exc} (尝试 {attempt}/{RETRY_COUNT})")
             except Exception as exc:
                 last_error = exc
-                logger.warning(
-                    f"[{source}] [{server.server_name}] 本地查询异常: {exc} "
-                    f"(尝试 {attempt}/{RETRY_COUNT})"
-                )
+                logger.warning(f"[{source}] [{server.server_name}] 本地查询异常: {exc} (尝试 {attempt}/{RETRY_COUNT})")
 
             if attempt < RETRY_COUNT:
                 await asyncio.sleep(RETRY_BACKOFF)
 
-        logger.debug(
-            f"[{source}] [{server.server_name}] 本地查询最终失败: {last_error}"
-        )
+        logger.debug(f"[{source}] [{server.server_name}] 本地查询最终失败: {last_error}")
         return None
 
     # ---------- Java 版 (TCP SLP / Legacy Ping) ----------
@@ -438,16 +417,19 @@ class LocalStatusClient:
 
         try:
             return await self._fetch_java_slp(server, source, host, port)
+        except asyncio.TimeoutError:
+            # 超时说明目标不可达（丢包 / 防火墙 / 服务端卡死），换 Legacy 协议
+            # 只会再消耗一个完整超时预算，因此这里直接失败，不做协议回退。
+            # 注意：Python 3.11+ 的 asyncio.TimeoutError 是内建 TimeoutError 的别名，
+            # 而 TimeoutError 继承自 OSError，所以这个分支必须排在 OSError 之前。
+            raise
         except (asyncio.IncompleteReadError, ValueError, OSError) as exc:
             # SLP 路径在三种情况下需要回退：
             # 1. IncompleteReadError：连接被对方关闭，没读到任何字节（典型 Mohist/老服务器）
             # 2. ValueError：响应包 ID 异常、字段缺失
             # 3. OSError：底层网络错误
             err_text = str(exc) if isinstance(exc, (ValueError, OSError)) else "连接被服务器关闭（无响应数据）"
-            logger.debug(
-                f"[{source}] [{server.server_name}] 现代 SLP 失败 ({err_text})，"
-                f"尝试 Legacy Ping 协议"
-            )
+            logger.debug(f"[{source}] [{server.server_name}] 现代 SLP 失败 ({err_text})，尝试 Legacy Ping 协议")
             return await self._fetch_java_legacy(server, source, host, port)
 
     async def _fetch_java_slp(
@@ -458,28 +440,23 @@ class LocalStatusClient:
         port: int,
     ) -> ServerSnapshot:
         """通过现代 SLP 协议（握手 + 状态查询）查询 Java 版服务器。"""
-        logger.debug(
-            f"[{source}] [{server.server_name}] 本地 SLP 探测 (Java): "
-            f"{host}:{port}"
-        )
+        logger.debug(f"[{source}] [{server.server_name}] 本地 SLP 探测 (Java): {host}:{port}")
 
         # 构造握手包 + 状态请求包，一次性发送。
         # 注意：握手包必须携带 [包 ID][协议版本 VarInt][服务器地址 String][端口 u16][下一状态 VarInt]。
         # 早期版本漏发了"协议版本"字段，导致服务端无法解析握手包并直接断开 TCP 连接，
         # 从而永远无法走通现代 SLP（1.20.x 服务端也会如此表现）。
         handshake_packet = (
-            _varint_encode(0x00)            # 包 ID：握手
+            _varint_encode(0x00)  # 包 ID：握手
             + _varint_encode(SLP_PROTOCOL_VERSION)  # 协议版本（必填！）
-            + _pack_string(host)            # 服务器地址
-            + struct.pack(">H", port)       # 端口（2 字节大端）
-            + _varint_encode(1)             # 下一状态：1 表示状态查询
+            + _pack_string(host)  # 服务器地址
+            + struct.pack(">H", port)  # 端口（2 字节大端）
+            + _varint_encode(1)  # 下一状态：1 表示状态查询
         )
         handshake_frame = _varint_encode(len(handshake_packet)) + handshake_packet
 
         status_request_packet = _varint_encode(0x00)  # 包 ID：状态请求
-        status_request_frame = (
-            _varint_encode(len(status_request_packet)) + status_request_packet
-        )
+        status_request_frame = _varint_encode(len(status_request_packet)) + status_request_packet
 
         loop = asyncio.get_running_loop()
         connect_started = loop.time()
@@ -494,38 +471,28 @@ class LocalStatusClient:
             await asyncio.wait_for(writer.drain(), timeout=self.timeout)
 
             # 读取响应包长度 VarInt
-            response_length = await asyncio.wait_for(
-                _read_varint(reader), timeout=self.timeout
-            )
+            response_length = await asyncio.wait_for(_read_varint(reader), timeout=self.timeout)
+            if response_length <= 0 or response_length > MAX_STATUS_PACKET_BYTES:
+                raise ValueError(f"SLP 状态响应包长度异常: {response_length} 字节")
             # 读取包 ID（必须是 0x00）
-            packet_id = await asyncio.wait_for(
-                _read_varint(reader), timeout=self.timeout
-            )
+            packet_id = await asyncio.wait_for(_read_varint(reader), timeout=self.timeout)
             if packet_id != 0x00:
                 raise ValueError(f"未知的响应包 ID: 0x{packet_id:02x}")
 
             # 读取 JSON 字符串
-            json_text = await asyncio.wait_for(
-                _read_string(reader), timeout=self.timeout
-            )
+            json_text = await asyncio.wait_for(_read_string(reader), timeout=self.timeout)
 
             # 延迟测量（可选）：现代 SLP 中由【客户端】发送 Ping(0x01 + 8 字节时间戳)，
             # 服务端原样回写 Pong(0x01 + 同一 8 字节)。不能反过来等服务端先发，否则
             # 每次查询都会白白阻塞。整个 ping/pong 预算限定在 1 秒内，失败直接忽略。
             latency_ms: int | None = None
             try:
-                ping_payload = _varint_encode(0x01) + struct.pack(
-                    ">q", int(loop.time() * 1000)
-                )
+                ping_payload = _varint_encode(0x01) + struct.pack(">q", int(loop.time() * 1000))
                 ping_frame = _varint_encode(len(ping_payload)) + ping_payload
                 writer.write(ping_frame)
                 await asyncio.wait_for(writer.drain(), timeout=1.0)
-                pong_frame_len = await asyncio.wait_for(
-                    _read_varint(reader), timeout=1.0
-                )
-                pong_payload = await asyncio.wait_for(
-                    reader.readexactly(pong_frame_len), timeout=1.0
-                )
+                pong_frame_len = await asyncio.wait_for(_read_varint(reader), timeout=1.0)
+                pong_payload = await asyncio.wait_for(reader.readexactly(pong_frame_len), timeout=1.0)
                 if pong_payload and pong_payload[0] == 0x01:
                     latency_ms = int((loop.time() - connect_started) * 1000)
             except (
@@ -571,10 +538,7 @@ class LocalStatusClient:
                 （UTF-16BE，不含前导 §1）
         此方法兼容上述所有格式。
         """
-        logger.debug(
-            f"[{source}] [{server.server_name}] 本地 Legacy Ping (Java): "
-            f"{host}:{port}"
-        )
+        logger.debug(f"[{source}] [{server.server_name}] 本地 Legacy Ping (Java): {host}:{port}")
 
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port),
@@ -589,11 +553,25 @@ class LocalStatusClient:
             if first_byte[0] != 0xFF:
                 raise ValueError(f"Legacy Ping 响应首字节非 0xFF，得到 0x{first_byte[0]:02x}")
 
-            # 余下所有内容是 UTF-16BE 字符串（部分服务端 MOTD 较长，读取上限放宽）
-            payload = await asyncio.wait_for(
-                reader.read(65536),
-                timeout=min(2.0, self.timeout),
-            )
+            # 余下所有内容是 UTF-16BE 字符串（部分服务端 MOTD 较长，读取上限放宽）。
+            # 响应体可能被拆成多个 TCP 段（慢链路、反向代理），单次 read() 不保证
+            # 读满；这里持续读取直到 EOF 或空闲超时，避免把半包当成完整包解析。
+            idle_timeout = min(LEGACY_IDLE_TIMEOUT, self.timeout)
+            chunks: list[bytes] = []
+            total = 0
+            while total < MAX_LEGACY_PAYLOAD_BYTES:
+                try:
+                    chunk = await asyncio.wait_for(
+                        reader.read(min(4096, MAX_LEGACY_PAYLOAD_BYTES - total)),
+                        timeout=idle_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    break
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            payload = b"".join(chunks)
         finally:
             try:
                 writer.close()
@@ -604,9 +582,7 @@ class LocalStatusClient:
         if not payload:
             raise asyncio.IncompleteReadError(payload, 1)
 
-        protocol_str, version_name, motd, online_players, max_players = (
-            _parse_legacy_payload(payload)
-        )
+        protocol_str, version_name, motd, online_players, max_players = _parse_legacy_payload(payload)
 
         return ServerSnapshot(
             key=server.key,
@@ -657,11 +633,7 @@ class LocalStatusClient:
         motd = _extract_motd_from_json(data.get("description", {}) or {})
 
         # favicon 是 base64 编码的图片数据，前端不需要，不再解析。
-        software = str(
-            data.get("software")
-            or data.get("server_mod")
-            or "未知"
-        )
+        software = str(data.get("software") or data.get("server_mod") or "未知")
 
         # modinfo / forgeData / etc.，暂不展开。
         return ServerSnapshot(
@@ -691,8 +663,7 @@ class LocalStatusClient:
     async def _fetch_bedrock(self, server: ServerConfig, source: str) -> ServerSnapshot:
         """通过 RAKNET Unconnected Ping 查询 Bedrock 版服务器。"""
         logger.debug(
-            f"[{source}] [{server.server_name}] 本地 RAKNET 探测 (Bedrock): "
-            f"{server.server_ip}:{server.server_port}"
+            f"[{source}] [{server.server_name}] 本地 RAKNET 探测 (Bedrock): {server.server_ip}:{server.server_port}"
         )
 
         host = server.server_ip
@@ -702,10 +673,10 @@ class LocalStatusClient:
         ping_time = random.randint(0, 2**31 - 1)
         client_guid = random.randint(0, 2**63 - 1)
         packet = (
-            bytes([0x01])                        # 包 ID
-            + struct.pack(">Q", ping_time)       # 发送时间戳
-            + struct.pack(">Q", client_guid)     # 客户端 GUID
-            + RAKNET_MAGIC                       # magic 字节
+            bytes([0x01])  # 包 ID
+            + struct.pack(">Q", ping_time)  # 发送时间戳
+            + struct.pack(">Q", client_guid)  # 客户端 GUID
+            + RAKNET_MAGIC  # magic 字节
         )
 
         loop = asyncio.get_running_loop()
@@ -780,7 +751,6 @@ class LocalStatusClient:
         version_name = _f(3)
         online_str = _f(4)
         max_str = _f(5)
-        server_id = _f(6)
         sub_motd = _f(7)
         game_mode = _f(8)
 

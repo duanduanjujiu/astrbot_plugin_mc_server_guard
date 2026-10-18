@@ -117,9 +117,7 @@ def format_server_info(snapshot: ServerSnapshot | None, display_options: Display
 # ---------------------------------------------------------------------------
 
 
-def _reset_player_baseline(
-    state: ServerState, observed: str, snapshot: ServerSnapshot
-) -> None:
+def _reset_player_baseline(state: ServerState, observed: str, snapshot: ServerSnapshot) -> None:
     """把玩家进出基线重置为给定状态的初始值（不产生任何通知）。"""
     if observed == "online":
         state.last_player_count = snapshot.online
@@ -131,9 +129,7 @@ def _reset_player_baseline(
     state.pending_anonymous_polls = 0
 
 
-def _diff_players(
-    server: ServerConfig, state: ServerState, snapshot: ServerSnapshot
-) -> tuple[bool, str | None]:
+def _diff_players(server: ServerConfig, state: ServerState, snapshot: ServerSnapshot) -> tuple[bool, str | None]:
     """在“服务器稳定在线”的前提下 diff 玩家进出（含匿名占位名补偿）。
 
     仅在调用方确认 snapshot.status == "online" 时调用；本函数会更新
@@ -150,9 +146,7 @@ def _diff_players(
         # 有玩家加入
         newly_named = sorted(set(real_names) - set(state.last_player_list))
         if newly_named:
-            changes.append(
-                f"📈 {server.server_name}: {', '.join(newly_named)} 加入了服务器 (+{diff})"
-            )
+            changes.append(f"📈 {server.server_name}: {', '.join(newly_named)} 加入了服务器 (+{diff})")
             state.last_player_list = real_names[:]
             state.pending_anonymous = 0
             resolved_this_poll = True
@@ -165,9 +159,7 @@ def _diff_players(
         newly_named = sorted(set(real_names) - set(state.last_player_list))
         if newly_named and state.pending_anonymous > 0:
             # 之前挂起的匿名加入者，现在解析出了真实名
-            changes.append(
-                f"📈 {server.server_name}: {', '.join(newly_named)} 加入了服务器"
-            )
+            changes.append(f"📈 {server.server_name}: {', '.join(newly_named)} 加入了服务器")
             state.last_player_list = real_names[:]
             state.pending_anonymous = 0
             resolved_this_poll = True
@@ -181,14 +173,10 @@ def _diff_players(
         # 有玩家离开
         left_known = sorted(set(state.last_player_list) - set(real_names))
         if left_known:
-            changes.append(
-                f"📉 {server.server_name}: {', '.join(left_known)} 离开了服务器 ({diff})"
-            )
+            changes.append(f"📉 {server.server_name}: {', '.join(left_known)} 离开了服务器 ({diff})")
         else:
             # 离开的是尚未解析出名字（匿名）的玩家
-            changes.append(
-                f"📉 {server.server_name}: 有 {-diff} 名玩家离开了服务器 ({diff})"
-            )
+            changes.append(f"📉 {server.server_name}: 有 {-diff} 名玩家离开了服务器 ({diff})")
         state.last_player_count = current_count
         state.last_player_list = real_names[:]
         if state.pending_anonymous > 0:
@@ -200,9 +188,7 @@ def _diff_players(
         state.pending_anonymous_polls += 1
         if state.pending_anonymous_polls >= 2:
             pending = state.pending_anonymous
-            changes.append(
-                f"📈 {server.server_name}: 有 {pending} 名玩家加入了服务器（名单暂未公开）"
-            )
+            changes.append(f"📈 {server.server_name}: 有 {pending} 名玩家加入了服务器（名单暂未公开）")
             state.pending_anonymous = 0
             state.pending_anonymous_polls = 0
     elif state.pending_anonymous == 0:

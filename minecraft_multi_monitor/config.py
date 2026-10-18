@@ -3,15 +3,16 @@ import re
 from astrbot.api import AstrBotConfig, logger
 
 from .models import (
+    DEFAULT_BEDROCK_PORT,
     DEFAULT_CHECK_INTERVAL,
     DEFAULT_ENABLE_AUTO_MONITOR,
+    DEFAULT_JAVA_PORT,
     MIN_CHECK_INTERVAL,
     DisplayOptions,
     PluginSettings,
     ServerConfig,
     ServerState,
 )
-
 
 DISPLAY_DEFAULTS = DisplayOptions()
 
@@ -91,9 +92,7 @@ def load_display_options(config: AstrBotConfig) -> DisplayOptions:
 
 
 def load_settings(config: AstrBotConfig) -> PluginSettings:
-    global_check_interval = safe_int(
-        config.get("check_interval"), DEFAULT_CHECK_INTERVAL
-    )
+    global_check_interval = safe_int(config.get("check_interval"), DEFAULT_CHECK_INTERVAL)
     if global_check_interval < MIN_CHECK_INTERVAL:
         global_check_interval = MIN_CHECK_INTERVAL
 
@@ -101,9 +100,7 @@ def load_settings(config: AstrBotConfig) -> PluginSettings:
         target_group=parse_target_group(config.get("target_group")),
         target_umo=parse_umo(config.get("target_umo")),
         # 与 _conf_schema.json 的 default 保持一致：插件加载后默认自动启动监控。
-        enable_auto_monitor=safe_bool(
-            config.get("enable_auto_monitor"), DEFAULT_ENABLE_AUTO_MONITOR
-        ),
+        enable_auto_monitor=safe_bool(config.get("enable_auto_monitor"), DEFAULT_ENABLE_AUTO_MONITOR),
         global_check_interval=global_check_interval,
         display_options=load_display_options(config),
     )
@@ -132,6 +129,10 @@ def load_servers_from_config(config: AstrBotConfig, global_check_interval: int) 
         if not enabled:
             continue
 
+        # 先确定服务器类型，再解析地址：Bedrock 版默认端口是 19132 而不是 25565。
+        server_type = normalize_server_type(item.get("server_type", "java"))
+        default_port = DEFAULT_BEDROCK_PORT if server_type == "bedrock" else DEFAULT_JAVA_PORT
+
         raw_key = str(item.get("key", "")).strip()
         raw_name = str(item.get("server_name", "")).strip()
         default_name = raw_key or f"服务器{index}"
@@ -145,20 +146,19 @@ def load_servers_from_config(config: AstrBotConfig, global_check_interval: int) 
                 server_address = legacy_srv
             else:
                 legacy_ip = str(item.get("server_ip", "")).strip()
-                legacy_port = safe_int(item.get("server_port", 25565), 25565)
+                legacy_port = safe_int(item.get("server_port", default_port), default_port)
                 if legacy_ip:
                     server_address = f"{legacy_ip}:{legacy_port}"
 
-        parsed = _parse_server_address(server_address)
+        parsed = _parse_server_address(server_address, default_port=default_port)
         if parsed is None:
-            logger.warning(
-                f"{server_name} 的 server_address 配置无效 ({server_address!r})，已跳过。"
-            )
+            logger.warning(f"{server_name} 的 server_address 配置无效 ({server_address!r})，已跳过。")
             continue
 
         server_ip, server_port = parsed
-        server_type = normalize_server_type(item.get("server_type", "java"))
-        check_interval = resolve_check_interval(item.get("check_interval", global_check_interval), global_check_interval)
+        check_interval = resolve_check_interval(
+            item.get("check_interval", global_check_interval), global_check_interval
+        )
         key = raw_key or slugify_server_key(server_name, f"server_{index}")
 
         servers.append(
@@ -187,16 +187,20 @@ def _normalize_server_address(value) -> str:
     return text
 
 
-def _parse_server_address(address: str) -> tuple[str, int] | None:
+def _parse_server_address(address: str, *, default_port: int = DEFAULT_JAVA_PORT) -> tuple[str, int] | None:
     """解析用户填的统一地址，返回 (host, port)。
 
+    Args:
+        address: 用户填写的地址字符串。
+        default_port: 未显式指定端口时使用的端口（Java 25565 / Bedrock 19132）。
+
     支持的格式：
-      - "192.168.1.10"             → ("192.168.1.10", 25565)
+      - "192.168.1.10"             → ("192.168.1.10", default_port)
       - "192.168.1.10:25566"        → ("192.168.1.10", 25566)
-      - "play.example.com"          → ("play.example.com", 25565)
+      - "play.example.com"          → ("play.example.com", default_port)
       - "play.example.com:25566"     → ("play.example.com", 25566)
-      - "_minecraft._tcp.example.com" → ("_minecraft._tcp.example.com", 25565)
-      - "_minecraft._tcp.example.com:25565" → ("_minecraft._tcp.example.com", 25565)
+      - "_minecraft._tcp.example.com" → ("_minecraft._tcp.example.com", default_port)
+      - "_minecraft._tcp.example.com:25565" → ("_minecraft._tcp.example.com", default_port)
         （SRV 记录的端口由记录本身决定；此处 :port 会被忽略）
 
     返回 None 表示输入无效。
@@ -227,12 +231,12 @@ def _parse_server_address(address: str) -> tuple[str, int] | None:
 
     # 如果是 SRV，明确忽略端口（端口信息来自 DNS 记录本身）
     if is_srv:
-        return host_part, 25565  # 占位端口，实际使用 SRV 解析后的端口
+        return host_part, default_port  # 占位端口，实际使用 SRV 解析后的端口
 
     if not host_part:
         return None
 
-    port = explicit_port if explicit_port is not None else 25565
+    port = explicit_port if explicit_port is not None else default_port
     return host_part, port
 
 

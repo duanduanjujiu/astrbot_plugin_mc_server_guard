@@ -69,9 +69,7 @@ async def _send_by_umo(context, umo: str, text: str) -> bool:
             from astrbot.core.message.message_event_result import MessageChain
 
         chain = MessageChain().message(text)
-        logger.info(
-            f"通过 UMO 发送消息到 {umo}，消息长度: {len(text)}"
-        )
+        logger.info(f"通过 UMO 发送消息到 {umo}，消息长度: {len(text)}")
         ok = await context.send_message(umo, chain)
         if ok:
             logger.info(f"UMO 消息发送成功: {umo}")
@@ -97,7 +95,9 @@ async def _resolve_platform(context):
     return None, None
 
 
-async def wait_for_platform_ready(context, timeout_seconds: float = PLATFORM_WAIT_TIMEOUT, interval_seconds: float = 0.5):
+async def wait_for_platform_ready(
+    context, timeout_seconds: float = PLATFORM_WAIT_TIMEOUT, interval_seconds: float = 0.5
+):
     """循环等待至少一个可用平台适配器出现。"""
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     while True:
@@ -127,8 +127,7 @@ async def _send_to_qq_group(context, group_id: str, text: str) -> bool:
         for attempt in range(1, SEND_MAX_ATTEMPTS + 1):
             try:
                 logger.info(
-                    f"开始发送群消息到 {group_id}（第 {attempt}/{SEND_MAX_ATTEMPTS} 次），"
-                    f"消息长度: {len(text)}"
+                    f"开始发送群消息到 {group_id}（第 {attempt}/{SEND_MAX_ATTEMPTS} 次），消息长度: {len(text)}"
                 )
                 result = await client.api.call_action(
                     "send_group_msg",
@@ -139,9 +138,7 @@ async def _send_to_qq_group(context, group_id: str, text: str) -> bool:
                 if isinstance(result, dict):
                     message_id = result.get("message_id") or result.get("msg_id")
                 if message_id is not None:
-                    logger.info(
-                        f"群消息发送成功，message_id={message_id}（第 {attempt} 次尝试）"
-                    )
+                    logger.info(f"群消息发送成功，message_id={message_id}（第 {attempt} 次尝试）")
                     return True
 
                 last_error = result
@@ -155,10 +152,7 @@ async def _send_to_qq_group(context, group_id: str, text: str) -> bool:
             if attempt < SEND_MAX_ATTEMPTS:
                 await asyncio.sleep(SEND_RETRY_INTERVAL)
 
-        logger.error(
-            f"群消息重试 {SEND_MAX_ATTEMPTS} 次后仍发送失败: {last_error}；"
-            f"消息内容预览: {text[:200]}"
-        )
+        logger.error(f"群消息重试 {SEND_MAX_ATTEMPTS} 次后仍发送失败: {last_error}；消息内容预览: {text[:200]}")
         return False
     except asyncio.CancelledError:
         raise
@@ -189,9 +183,7 @@ async def notify(
         # 兼容回退：UMO 指向的是 QQ 群（GroupMessage + 纯数字）
         if _looks_like_qq_group_umo(umo):
             fallback_group = umo.split(":", 2)[2]
-            logger.warning(
-                f"UMO 发送失败，回退到群号发送: {fallback_group}（原因见上方日志）"
-            )
+            logger.warning(f"UMO 发送失败，回退到群号发送: {fallback_group}（原因见上方日志）")
             return await _send_to_qq_group(context, fallback_group, text)
         return False
 

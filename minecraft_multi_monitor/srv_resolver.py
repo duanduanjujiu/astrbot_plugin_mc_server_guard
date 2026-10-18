@@ -14,7 +14,6 @@ import dns.asyncresolver
 import dns.exception
 import dns.rdatatype
 import dns.resolver
-
 from astrbot.api import logger
 
 
@@ -25,6 +24,7 @@ class SrvTarget:
     Minecraft SRV 记录的 target 是主机名（不一定是 IP），port 是端口，
     weight/priority 用于负载均衡，本插件只取第一个返回结果。
     """
+
     host: str
     port: int
     priority: int
@@ -61,7 +61,6 @@ async def resolve_srv(record_name: str, *, timeout: float = 5.0) -> SrvTarget | 
     """
     full_name = ensure_srv_record_name(record_name)
 
-    loop = asyncio.get_running_loop()
     resolver = dns.asyncresolver.Resolver()
     # 让 resolver 在异步上下文里使用，避免阻塞事件循环
     resolver.lifetime = timeout
@@ -114,6 +113,7 @@ async def resolve_host(host: str, *, timeout: float = 3.0) -> str | None:
     Returns:
         IP 字符串或 None。
     """
+
     def _do() -> str | None:
         try:
             infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
@@ -121,10 +121,11 @@ async def resolve_host(host: str, *, timeout: float = 3.0) -> str | None:
             return None
         if not infos:
             return None
-        # 优先 IPv4
-        for family, *_ in infos:
-            if family == socket.AF_INET:
-                return infos[0][4][0]
+        # 优先 IPv4：必须返回当前命中的 AF_INET 项，而不是固定的 infos[0]，
+        # 否则当系统把 AAAA 记录排在前面时会错误地返回 IPv6 地址。
+        for info in infos:
+            if info[0] == socket.AF_INET:
+                return info[4][0]
         return infos[0][4][0]
 
     try:
@@ -153,9 +154,7 @@ async def resolve_srv_with_ip(record_name: str, *, timeout: float = 5.0) -> tupl
             socket.inet_aton(target.host)
             return target.host, target.port
         except OSError:
-            logger.warning(
-                f"SRV 解析: 主机名 {target.host} 既无法解析为 IP 也不是 IPv4 字面量"
-            )
+            logger.warning(f"SRV 解析: 主机名 {target.host} 既无法解析为 IP 也不是 IPv4 字面量")
             return None
 
     return ip, target.port

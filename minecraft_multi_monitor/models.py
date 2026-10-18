@@ -9,6 +9,11 @@ from dataclasses import dataclass, field
 DEFAULT_CHECK_INTERVAL = 45
 MIN_CHECK_INTERVAL = 5
 
+# 服务器默认端口：Java 版 25565，Bedrock 版 19132。
+# 用户只填地址（不带端口）时按 server_type 选用，避免把基岩服默认连到 25565。
+DEFAULT_JAVA_PORT = 25565
+DEFAULT_BEDROCK_PORT = 19132
+
 # 插件加载后是否默认自动启动监控（与 schema "enable_auto_monitor" default 对齐）
 DEFAULT_ENABLE_AUTO_MONITOR = True
 
@@ -78,8 +83,8 @@ class ServerState:
     # 1.19.1+ 服务端在玩家刚进入时，状态查询的 players.sample 会短暂返回占位名
     # "Anonymous Player"，真实名字要等服务器刷新后才出现。这几个字段用于把这类
     # 加入事件"挂起"，待名字解析出来后再播报真名，避免把占位名当玩家名推送。
-    pending_anonymous: int = 0            # 尚未解析出真名的加入人数
-    pending_anonymous_polls: int = 0      # 连续多少个周期仍未解析（用于兜底播报）
+    pending_anonymous: int = 0  # 尚未解析出真名的加入人数
+    pending_anonymous_polls: int = 0  # 连续多少个周期仍未解析（用于兜底播报）
 
 
 @dataclass(slots=True)

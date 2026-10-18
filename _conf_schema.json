@@ -114,7 +114,7 @@
           "server_address": {
             "description": "服务器地址",
             "type": "string",
-            "hint": "一个输入框搞定所有格式：IP（如 192.168.1.10）、IP+端口（如 192.168.1.10:25566）、域名（如 play.example.com）、域名+端口（如 play.example.com:25566）、Minecraft SRV 记录名（以 _ 开头，如 _minecraft._tcp.play.example.com）。插件会自动识别：IP 直接使用；域名先解析 A 记录，失败则自动尝试 _minecraft._tcp.<domain> SRV 记录。未指定端口时默认 25565；SRV 记录的端口由 DNS 决定。",
+            "hint": "一个输入框搞定所有格式：IP（如 192.168.1.10）、IP+端口（如 192.168.1.10:25566）、域名（如 play.example.com）、域名+端口（如 play.example.com:25566）、Minecraft SRV 记录名（以 _ 开头，如 _minecraft._tcp.play.example.com）。插件会自动识别：IP 直接使用；域名先解析 A 记录，失败则自动尝试 _minecraft._tcp.<domain> SRV 记录。未指定端口时 Java 默认 25565、Bedrock 默认 19132；SRV 记录的端口由 DNS 决定。",
             "default": ""
           },
           "server_type": {

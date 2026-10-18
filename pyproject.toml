@@ -1,9 +1,22 @@
 [project]
 name = "astrbot_plugin_mc_server_guard"
-version = "1.1.0"
+version = "1.1.1"
 description = "Minecraft 多服务器监控插件（AI 修改版：本地 SLP / RAKNET 直连、滞回判定、UMO 推送）"
 requires-python = ">=3.10"
 dependencies = [
     "aiohttp>=3.9,<4",
     "dnspython>=2.0,<3",
 ]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+# 使用 ruff 的经典默认规则 + import 排序；提交前请执行 `ruff format`（见 AstrBot 开发原则）。
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# main.py 必须先把插件目录加入 sys.path，再导入同目录的 minecraft_multi_monitor 包，
+# 因此这些导入天然位于模块级语句之后。
+"main.py" = ["E402"]
