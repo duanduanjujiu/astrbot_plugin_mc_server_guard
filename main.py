@@ -1,4 +1,11 @@
-"""AstrBot Minecraft 多服务器监控插件（AI 修改版 v1.2.0）。
+"""AstrBot Minecraft 多服务器监控插件（AI 修改版 v1.2.1）。
+
+v1.2.1（修复插件热更新后无法加载）：
+- AstrBot 重载插件时只会移除 ``data.plugins.<plugin>`` 模块，但本插件通过
+  ``sys.path`` 以顶层包名导入 ``minecraft_multi_monitor``。旧子包仍留在
+  ``sys.modules`` 中，热更新后新增的类 / 函数（如 ``FetchResult``）会
+  ``ImportError``。现于导入子包前清理指向本插件目录的同名顶层包缓存，
+  插件更新后无需重启 AstrBot，直接重载即可生效。
 
 v1.2.0（运行时健壮性与运维改进）：
 - **通知异步化**：状态变化通知入队后由后台 worker 发送，平台不可用 / 发送慢时
@@ -65,6 +72,34 @@ from astrbot.api.star import Context, Star
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if PLUGIN_DIR not in sys.path:
     sys.path.insert(0, PLUGIN_DIR)
+
+
+def _purge_stale_package(package_name: str) -> None:
+    """清理 sys.modules 中指向本插件目录的同名顶层包缓存。
+
+    AstrBot 重载插件只移除 ``data.plugins.<plugin>`` 模块，而 main.py 通过
+    ``sys.path`` 以顶层包名导入 ``minecraft_multi_monitor``。如果不清缓存，
+    热更新后仍会命中旧子包，新增的类 / 函数就会 ImportError。
+    只清理 ``__file__`` 位于本插件目录的模块，避免误删其他插件的同名包。
+    """
+    prefix = package_name + "."
+    for module_name in list(sys.modules):
+        if module_name != package_name and not module_name.startswith(prefix):
+            continue
+        module = sys.modules.get(module_name)
+        location = getattr(module, "__file__", None)
+        if not location:
+            sys.modules.pop(module_name, None)
+            continue
+        try:
+            inside_plugin = os.path.abspath(location).startswith(PLUGIN_DIR + os.sep)
+        except (OSError, TypeError):
+            inside_plugin = False
+        if inside_plugin:
+            sys.modules.pop(module_name, None)
+
+
+_purge_stale_package("minecraft_multi_monitor")
 
 from minecraft_multi_monitor.address import format_host_port
 from minecraft_multi_monitor.clients import build_status_client

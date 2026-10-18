@@ -230,5 +230,45 @@ class QueryCooldownTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("没有启用的服务器配置", replies[0])
 
 
+class StaleModulePurgeTest(unittest.TestCase):
+    """热更新时清理 sys.modules 中旧子包缓存（v1.2.1 修复）。"""
+
+    def _install_fake_module(self, name: str, file_path: str):
+        import sys
+        import types
+
+        module = types.ModuleType(name)
+        module.__file__ = file_path  # type: ignore[attr-defined]
+        sys.modules[name] = module
+        return module
+
+    def test_modules_inside_plugin_dir_are_purged(self):
+        import sys
+        from pathlib import Path
+
+        package_dir = Path(plugin_module.PLUGIN_DIR) / "fake_stale_pkg"
+        self._install_fake_module("fake_stale_pkg", str(package_dir / "__init__.py"))
+        self._install_fake_module("fake_stale_pkg.mod", str(package_dir / "mod.py"))
+
+        try:
+            plugin_module._purge_stale_package("fake_stale_pkg")
+            self.assertNotIn("fake_stale_pkg", sys.modules)
+            self.assertNotIn("fake_stale_pkg.mod", sys.modules)
+        finally:
+            sys.modules.pop("fake_stale_pkg", None)
+            sys.modules.pop("fake_stale_pkg.mod", None)
+
+    def test_modules_outside_plugin_dir_are_kept(self):
+        import sys
+
+        self._install_fake_module("fake_other_pkg", "/opt/other_plugin/fake_other_pkg/__init__.py")
+
+        try:
+            plugin_module._purge_stale_package("fake_other_pkg")
+            self.assertIn("fake_other_pkg", sys.modules)
+        finally:
+            sys.modules.pop("fake_other_pkg", None)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,23 @@
 
 ---
 
+## [1.2.1] - 2026-10
+
+### 🐛 修复：插件热更新后无法加载
+
+- **现象**：v1.2.0 通过 AstrBot WebUI 更新后插件加载失败：
+  `ImportError: cannot import name 'FetchResult' from 'minecraft_multi_monitor.models'`。
+- **原因**：插件通过 `sys.path` 以顶层包名导入 `minecraft_multi_monitor`，而
+  AstrBot 重载插件只会移除 `data.plugins.<plugin>` 模块，旧的顶层子包仍留在
+  `sys.modules`。v1.2.0 新增的 `FetchResult`（以及 `address` 模块）在旧的
+  `models` 缓存里不存在，于是更新后首次重载直接 ImportError。
+- **修复**：导入子包前调用 `_purge_stale_package("minecraft_multi_monitor")`，
+  只清理 `__file__` 位于本插件目录的模块，避免误删其他插件的同名包。此后
+  插件更新后**直接重载即可生效，无需重启 AstrBot**。
+- 新增对应单元测试（清理本插件目录内的缓存、保留其他目录的同名模块）。
+
+---
+
 ## [1.2.0] - 2026-10
 
 ### 🚀 运行时健壮性与运维改进
