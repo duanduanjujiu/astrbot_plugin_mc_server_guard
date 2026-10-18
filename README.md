@@ -95,10 +95,11 @@
 
 ## 指令
 
-- `/mc_start_server_monitor` 启动监控任务
-- `/mc_stop_server_monitor` 停止监控任务
-- `/mc_query` 立即查询当前所有已启用服务器的状态
+- `/mc_start_server_monitor` 启动监控任务（管理员）
+- `/mc_stop_server_monitor` 停止监控任务（管理员）
+- `/mc_query` 立即查询当前所有已启用服务器的状态（所有用户可用，3 秒全局冷却）
 - `/mc_reset_monitor` 重置监控缓存（管理员）
+- `/mc_reload` 重新读取 WebUI 配置并重建监控状态（管理员）
 - `/mc_push_target` 查看当前推送目标与用法（管理员）
 - `/mc_push_target <UMO>` 按 UMO 设置推送目标，如 `/mc_push_target atri:GroupMessage:1092815819`，并发送测试消息（管理员）
 - `/mc_push_target <QQ群号>` 兼容旧版：按纯数字群号设置（管理员）
@@ -145,6 +146,9 @@
 | `192.168.1.10:25566` | IPv4 + 端口 |
 | `play.example.com` | 域名，默认端口同上；如域名无 A 记录则自动尝试 SRV |
 | `play.example.com:25566` | 域名 + 端口 |
+| `[2001:db8::1]:25566` | IPv6 + 端口（方括号写法） |
+| `[2001:db8::1]` | IPv6，使用默认端口 |
+| `2001:db8::1` | 裸 IPv6 字面量，使用默认端口（端口需方括号写法） |
 | `_minecraft._tcp.play.example.com` | Minecraft SRV 记录（端口由 DNS 决定） |
 
 #### SRV 记录自动尝试
@@ -165,6 +169,7 @@
 当前代码已按职责拆分为包结构：
 
 - `main.py`: AstrBot 插件入口
+- `minecraft_multi_monitor/address.py`: 地址解析（IPv4 / IPv6 / 域名 / 端口）
 - `minecraft_multi_monitor/config.py`: 配置解析与默认值处理
 - `minecraft_multi_monitor/clients.py`: 本地 SLP 协议状态查询客户端（Java TCP + Bedrock UDP，含 Legacy Ping fallback）
 - `minecraft_multi_monitor/srv_resolver.py`: Minecraft SRV 记录异步解析（依赖 dnspython）
@@ -211,7 +216,9 @@ pip install -r /AstrBot/data/plugins/astrbot_plugin_mc_server_guard/requirements
 - 单次探测默认超时 5 秒、每轮最多重试 2 次（间隔 0.3 秒）；连续 3 轮失败才确认「已离线」，连续 2 轮成功才确认「已上线」（滞回，避免抖动刷屏）。
 - **超时不会回退 Legacy Ping**：超时说明目标不可达，换协议只会再消耗一个完整超时预算；只有连接被关闭 / 响应异常 / 非超时网络错误才会回退。
 - **多台服务器并发探测**：单台服务器探测较慢或被防火墙丢包时，不会拖慢其他服务器的检测节拍。
-- 查询失败（超时、连接拒绝、协议解析错误）会被转化为 `status="offline"` 的事件，用于触发"已离线"通知。
+- 查询失败（超时、连接拒绝、协议解析错误）会被转化为 `status="offline"` 的事件，用于触发"已离线"通知；**DNS / SRV 解析失败单独归类**，只跳过本轮，不会误报离线。
+- **通知异步发送**：状态变化通知先入队，由后台 worker 串行发送；平台发送慢或不可用不会阻塞监控循环（队列上限 100 条）。
+- **DNS 解析缓存**：成功结果缓存 5 分钟、失败缓存 30 秒；`/mc_reload` 会清空缓存。
 - 每次探测均创建独立连接并在使用后立即关闭，避免资源泄漏；SLP 状态响应体有 2 MiB 上限，防止异常响应导致超大内存分配。
 - Java 版 Legacy Ping 同时兼容 Beta 1.8-1.3（`§` 分隔）、1.4-1.5（`§1\x00` 前缀）、1.6（纯 `\x00` 分隔）三种历史格式；读取时持续累积直到连接关闭或空闲超时，兼容被拆分的 TCP 响应。
 - Bedrock 版未显式填写端口时默认 19132；Java 版默认 25565。
@@ -230,7 +237,7 @@ pip install -r /AstrBot/data/plugins/astrbot_plugin_mc_server_guard/requirements
 python -m unittest discover -s tests -v
 ```
 
-覆盖范围：Legacy Ping 解析与分片读取、超时/异常的回退行为、Bedrock 默认端口、SRV 主机解析（IPv4 优先）、上下线滞回与玩家进出 diff。提交前建议执行：
+覆盖范围（55 个用例）：Legacy Ping 解析与分片读取、超时/异常的回退行为、错误分类、Bedrock 默认端口、IPv6 地址解析、SRV 主机解析（IPv4 优先）与 DNS 缓存、通知队列、配置重载、查询限流、上下线滞回与玩家进出 diff。提交前建议执行：
 
 ```bash
 ruff format . && ruff check .

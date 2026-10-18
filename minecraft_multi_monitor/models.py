@@ -73,8 +73,6 @@ class ServerState:
     contradict_probes: int = 0
     # 连续拉取失败次数（status == "offline" 的采样）；用于降频/降级。
     consecutive_failures: int = 0
-    # 最近一次成功拉取的时间戳（loop.time()）。
-    last_success_ts: float = 0.0
 
     # ---- 玩家基线（只在稳定在线时更新）----
     last_player_count: int | None = None
@@ -101,8 +99,6 @@ class ServerSnapshot:
     online: int
     max_players: int
     players: list[str]
-    software: str
-    map_name: str
     update_time: str
     host: str = ""
     # 用户在 server_address 配置里填的原值（域名 / IP / SRV 记录名）。
@@ -110,3 +106,25 @@ class ServerSnapshot:
     server_address: str = ""
     latency_ms: int | None = None
     error: str | None = None
+
+
+@dataclass(slots=True)
+class FetchResult:
+    """一次状态拉取的结果。
+
+    ``snapshot`` 为 ``None`` 表示完全拿不到可用数据；此时 ``error_kind`` 说明原因：
+
+    - ``"resolve"``：地址 / SRV / DNS 解析失败。这类失败**不代表服务器离线**
+      （可能只是本机 DNS 故障），调用方应跳过本轮而不是计入掉线。
+    - ``"timeout"``：连接或读取超时（通常是丢包 / 防火墙 / 服务端卡死）。
+    - ``"network"``：连接被拒绝、连接重置等网络错误。
+    - ``"protocol"``：响应包格式异常、协议不匹配。
+    """
+
+    snapshot: ServerSnapshot | None
+    error_kind: str | None = None
+    error_message: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.snapshot is not None

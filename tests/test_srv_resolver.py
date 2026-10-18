@@ -1,4 +1,4 @@
-"""srv_resolver.py 主机名解析行为测试。"""
+"""srv_resolver.py 主机名解析、IPv6 与缓存行为测试。"""
 
 from __future__ import annotations
 
@@ -41,6 +41,76 @@ class EnsureSrvRecordNameTest(unittest.TestCase):
             srv_resolver.ensure_srv_record_name("_minecraft._tcp.play.example.com"),
             "_minecraft._tcp.play.example.com",
         )
+
+
+class ResolveServerTargetTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        srv_resolver.clear_resolve_cache()
+
+    async def test_ip_literals_bypass_dns(self):
+        with mock.patch.object(srv_resolver, "resolve_host") as resolve_host:
+            self.assertEqual(
+                await srv_resolver.resolve_server_target("192.0.2.1", 25565),
+                ("192.0.2.1", 25565, False),
+            )
+            self.assertEqual(
+                await srv_resolver.resolve_server_target("[2001:db8::1]:25566", 25565),
+                ("2001:db8::1", 25566, False),
+            )
+            resolve_host.assert_not_called()
+
+    async def test_success_is_cached(self):
+        calls = 0
+
+        async def fake_resolve_host(host, *, timeout=3.0):
+            nonlocal calls
+            calls += 1
+            return "192.0.2.9"
+
+        with mock.patch.object(srv_resolver, "resolve_host", fake_resolve_host):
+            first = await srv_resolver.resolve_server_target("play.example.com", 25565)
+            second = await srv_resolver.resolve_server_target("play.example.com", 25565)
+
+        self.assertEqual(first, ("192.0.2.9", 25565, False))
+        self.assertEqual(second, first)
+        self.assertEqual(calls, 1)
+
+    async def test_cache_can_be_cleared(self):
+        calls = 0
+
+        async def fake_resolve_host(host, *, timeout=3.0):
+            nonlocal calls
+            calls += 1
+            return "192.0.2.9"
+
+        with mock.patch.object(srv_resolver, "resolve_host", fake_resolve_host):
+            await srv_resolver.resolve_server_target("play.example.com", 25565)
+            srv_resolver.clear_resolve_cache()
+            await srv_resolver.resolve_server_target("play.example.com", 25565)
+
+        self.assertEqual(calls, 2)
+
+    async def test_negative_result_is_cached_briefly(self):
+        calls = 0
+
+        async def fake_resolve_host(host, *, timeout=3.0):
+            nonlocal calls
+            calls += 1
+            return None
+
+        async def fake_resolve_srv(*args, **kwargs):
+            return None
+
+        with (
+            mock.patch.object(srv_resolver, "resolve_host", fake_resolve_host),
+            mock.patch.object(srv_resolver, "resolve_srv_with_ip", fake_resolve_srv),
+        ):
+            first = await srv_resolver.resolve_server_target("bad.invalid", 25565)
+            second = await srv_resolver.resolve_server_target("bad.invalid", 25565)
+
+        self.assertEqual(first, ("", 0, False))
+        self.assertEqual(second, ("", 0, False))
+        self.assertEqual(calls, 1)
 
 
 if __name__ == "__main__":

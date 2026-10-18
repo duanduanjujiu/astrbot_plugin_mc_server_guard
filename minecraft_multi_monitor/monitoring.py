@@ -9,6 +9,7 @@ v1.0.0（本地 fork）起，上下线判定加入**滞回确认**：
 玩家进出 diff、1.19.1+ Anonymous Player 占位名补偿等逻辑保持原样。
 """
 
+from .address import format_host_port
 from .models import DisplayOptions, ServerConfig, ServerSnapshot, ServerState
 
 # ---------------------------------------------------------------------------
@@ -74,7 +75,11 @@ def format_server_info(snapshot: ServerSnapshot | None, display_options: Display
 
     if display_options.show_server_address:
         # 优先展示主人填写的原值（如 mc.example.com），fallback 到解析后的 IP:port
-        addr = snapshot.server_address if snapshot.server_address else f"{snapshot.server_ip}:{snapshot.server_port}"
+        addr = (
+            snapshot.server_address
+            if snapshot.server_address
+            else format_host_port(snapshot.server_ip, snapshot.server_port)
+        )
         lines.append(f"🌐 地址: {addr}")
 
     if display_options.show_server_type:
@@ -85,6 +90,9 @@ def format_server_info(snapshot: ServerSnapshot | None, display_options: Display
 
     if display_options.show_online_players:
         lines.append(f"👥 在线玩家: {snapshot.online}/{snapshot.max_players}")
+
+    if snapshot.latency_ms is not None and snapshot.status == "online":
+        lines.append(f"📶 延迟: {snapshot.latency_ms} ms")
 
     motd = snapshot.motd.strip()
     if display_options.show_motd and motd:

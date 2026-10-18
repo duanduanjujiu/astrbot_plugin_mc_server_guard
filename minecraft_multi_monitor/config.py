@@ -2,6 +2,7 @@ import re
 
 from astrbot.api import AstrBotConfig, logger
 
+from .address import format_host_port, split_host_port
 from .models import (
     DEFAULT_BEDROCK_PORT,
     DEFAULT_CHECK_INTERVAL,
@@ -148,7 +149,8 @@ def load_servers_from_config(config: AstrBotConfig, global_check_interval: int) 
                 legacy_ip = str(item.get("server_ip", "")).strip()
                 legacy_port = safe_int(item.get("server_port", default_port), default_port)
                 if legacy_ip:
-                    server_address = f"{legacy_ip}:{legacy_port}"
+                    # IPv6 需要方括号形式，否则拼接出的 "::1:25565" 无法再正确拆分
+                    server_address = format_host_port(legacy_ip, legacy_port)
 
         parsed = _parse_server_address(server_address, default_port=default_port)
         if parsed is None:
@@ -195,10 +197,12 @@ def _parse_server_address(address: str, *, default_port: int = DEFAULT_JAVA_PORT
         default_port: 未显式指定端口时使用的端口（Java 25565 / Bedrock 19132）。
 
     支持的格式：
-      - "192.168.1.10"             → ("192.168.1.10", default_port)
-      - "192.168.1.10:25566"        → ("192.168.1.10", 25566)
-      - "play.example.com"          → ("play.example.com", default_port)
-      - "play.example.com:25566"     → ("play.example.com", 25566)
+      - "192.168.1.10"                → ("192.168.1.10", default_port)
+      - "192.168.1.10:25566"          → ("192.168.1.10", 25566)
+      - "play.example.com"            → ("play.example.com", default_port)
+      - "play.example.com:25566"      → ("play.example.com", 25566)
+      - "[2001:db8::1]"               → ("2001:db8::1", default_port)
+      - "[2001:db8::1]:25566"         → ("2001:db8::1", 25566)
       - "_minecraft._tcp.example.com" → ("_minecraft._tcp.example.com", default_port)
       - "_minecraft._tcp.example.com:25565" → ("_minecraft._tcp.example.com", default_port)
         （SRV 记录的端口由记录本身决定；此处 :port 会被忽略）
@@ -212,32 +216,13 @@ def _parse_server_address(address: str, *, default_port: int = DEFAULT_JAVA_PORT
     if not text:
         return None
 
-    # 判断是否 SRV 记录（开头是 _，例如 _minecraft._tcp.example.com）
-    is_srv = text.startswith("_")
+    # SRV 记录（开头是 _，例如 _minecraft._tcp.example.com）：
+    # 端口由 DNS 记录决定，用户是否写了 :port 都忽略。
+    if text.startswith("_"):
+        host_part = text.rsplit(":", 1)[0].strip() if ":" in text else text
+        return (host_part, default_port) if host_part else None
 
-    # 拆分可选的端口后缀
-    host_part = text
-    explicit_port: int | None = None
-    if ":" in text:
-        # IPv6 不在常见范围内（用 [] 包裹），Minecraft 域名/IP 通常不含 IPv6 字面量
-        host_part, port_str = text.rsplit(":", 1)
-        host_part = host_part.strip()
-        try:
-            explicit_port = int(port_str)
-            if not (1 <= explicit_port <= 65535):
-                return None
-        except ValueError:
-            return None
-
-    # 如果是 SRV，明确忽略端口（端口信息来自 DNS 记录本身）
-    if is_srv:
-        return host_part, default_port  # 占位端口，实际使用 SRV 解析后的端口
-
-    if not host_part:
-        return None
-
-    port = explicit_port if explicit_port is not None else default_port
-    return host_part, port
+    return split_host_port(text, default_port=default_port)
 
 
 def build_initial_states(servers: list[ServerConfig]) -> dict[str, ServerState]:

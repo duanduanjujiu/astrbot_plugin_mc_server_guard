@@ -10,14 +10,14 @@ import asyncio
 import json
 import random
 import re
-import socket
 import struct
 from datetime import datetime
 from typing import Any
 
 from astrbot.api import logger
 
-from .models import ServerConfig, ServerSnapshot
+from .address import format_host_port, is_ip_literal
+from .models import FetchResult, ServerConfig, ServerSnapshot
 
 # 默认超时（秒）。原远程客户端的查询超时普遍为 15-25 秒，本地直连应更短。
 DEFAULT_TIMEOUT = 5.0
@@ -278,34 +278,26 @@ async def _read_short_string(reader: asyncio.StreamReader) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _is_ip_literal(value: str) -> bool:
-    """判断字符串是否为 IPv4 或 IPv6 字面量。"""
-    if not value:
-        return False
-    try:
-        socket.inet_pton(socket.AF_INET, value)
-        return True
-    except OSError:
-        pass
-    try:
-        socket.inet_pton(socket.AF_INET6, value)
-        return True
-    except OSError:
-        pass
-    return False
-
-
 class LocalStatusClient:
     """基于 Minecraft SLP 协议的本地状态查询客户端。"""
 
     def __init__(self, timeout: float = DEFAULT_TIMEOUT):
         self.timeout = timeout
 
-    async def fetch_status(self, server: ServerConfig, source: str) -> ServerSnapshot | None:
-        """根据 server_type 选择对应协议拉取服务器状态。失败返回 None。
+    async def fetch_status(self, server: ServerConfig, source: str, *, quiet: bool = False) -> FetchResult:
+        """根据 server_type 选择对应协议拉取服务器状态。
 
         通过 server_address 统一解析目标地址（支持 IP / 域名 / SRV 记录名）。
+        返回 :class:`FetchResult`：成功时 ``snapshot`` 非空；失败时 ``error_kind``
+        区分 ``resolve`` / ``timeout`` / ``network`` / ``protocol``，便于调用方
+        决定是否计入掉线（解析失败不应算服务器离线）。
+
+        Args:
+            quiet: 降级 / 已确认失联的服务器传 True，把逐次重试的 WARNING 降到 DEBUG，
+                避免离线服务器每轮刷屏。
         """
+        log_failure = logger.debug if quiet else logger.warning
+
         # 通过 server_address 解析出真实 (ip, port)
         target_host = server.server_ip
         target_port = server.server_port
@@ -324,16 +316,17 @@ class LocalStatusClient:
                 if ip:
                     target_host = ip
                     target_port = port
+                    address_text = format_host_port(ip, port)
                     if srv_flag:
                         logger.debug(
-                            f"[{source}] [{server.server_name}] SRV 解析成功: {address_to_resolve} → {ip}:{port}"
+                            f"[{source}] [{server.server_name}] SRV 解析成功: {address_to_resolve} → {address_text}"
                         )
                     elif address_to_resolve != ip:
                         logger.debug(
-                            f"[{source}] [{server.server_name}] 主机名解析: {address_to_resolve} → {ip}:{port}"
+                            f"[{source}] [{server.server_name}] 主机名解析: {address_to_resolve} → {address_text}"
                         )
                 else:
-                    # 解析失败：仅在 server_ip 非空时回退，否则直接返回 None
+                    # 解析失败：仅在 server_ip 非空时回退，否则本轮视为"解析失败"
                     if server.server_ip:
                         logger.warning(
                             f"[{source}] [{server.server_name}] 解析失败 ({address_to_resolve})，"
@@ -344,12 +337,12 @@ class LocalStatusClient:
                     else:
                         logger.warning(
                             f"[{source}] [{server.server_name}] 解析失败 ({address_to_resolve})，"
-                            f"且未配置 server_ip 兜底，无法继续"
+                            f"且未配置 server_ip 兜底，本轮跳过"
                         )
-                        return None
+                        return FetchResult(None, "resolve", f"地址解析失败: {address_to_resolve}")
             except Exception as exc:
                 logger.warning(f"[{source}] [{server.server_name}] 解析异常: {exc}，回退到配置的 server_ip:server_port")
-        elif server.server_ip and not _is_ip_literal(server.server_ip):
+        elif server.server_ip and not is_ip_literal(server.server_ip):
             # 旧版配置只有 server_ip，可能是域名，尝试解析
             try:
                 from .srv_resolver import resolve_server_target
@@ -376,7 +369,8 @@ class LocalStatusClient:
             server_address=server.server_address,
         )
 
-        last_error: Exception | None = None
+        last_kind: str = "network"
+        last_message: str | None = None
         for attempt in range(1, RETRY_COUNT + 1):
             # 每次重试都需要新建一个协程对象，否则第二次 await 会失败。
             if resolved_server.server_type == "bedrock":
@@ -384,24 +378,27 @@ class LocalStatusClient:
             else:
                 attempt_coro = self._fetch_java(resolved_server, source)
             try:
-                return await attempt_coro
+                return FetchResult(await attempt_coro)
             except asyncio.TimeoutError:
-                last_error = asyncio.TimeoutError("query timeout")
-                logger.warning(
+                last_kind = "timeout"
+                last_message = f"查询超时（{self.timeout:g}s）"
+                log_failure(
                     f"[{source}] [{server.server_name}] 本地查询超时 ({self.timeout}s, 尝试 {attempt}/{RETRY_COUNT})"
                 )
             except (ConnectionRefusedError, OSError) as exc:
-                last_error = exc
-                logger.warning(f"[{source}] [{server.server_name}] 本地连接失败: {exc} (尝试 {attempt}/{RETRY_COUNT})")
+                last_kind = "network"
+                last_message = f"连接失败: {exc}"
+                log_failure(f"[{source}] [{server.server_name}] 本地连接失败: {exc} (尝试 {attempt}/{RETRY_COUNT})")
             except Exception as exc:
-                last_error = exc
-                logger.warning(f"[{source}] [{server.server_name}] 本地查询异常: {exc} (尝试 {attempt}/{RETRY_COUNT})")
+                last_kind = "protocol"
+                last_message = f"查询异常: {exc}"
+                log_failure(f"[{source}] [{server.server_name}] 本地查询异常: {exc} (尝试 {attempt}/{RETRY_COUNT})")
 
             if attempt < RETRY_COUNT:
                 await asyncio.sleep(RETRY_BACKOFF)
 
-        logger.debug(f"[{source}] [{server.server_name}] 本地查询最终失败: {last_error}")
-        return None
+        logger.debug(f"[{source}] [{server.server_name}] 本地查询最终失败: {last_message}")
+        return FetchResult(None, last_kind, last_message)
 
     # ---------- Java 版 (TCP SLP / Legacy Ping) ----------
 
@@ -597,10 +594,8 @@ class LocalStatusClient:
             online=online_players,
             max_players=max_players,
             players=[],  # Legacy Ping 不返回玩家列表
-            software="未知",
-            map_name="未知",
             update_time=_now_text(),
-            host=f"{host}:{port}",
+            host=format_host_port(host, port),
             server_address=server.server_address,
             latency_ms=None,
             error=None,
@@ -633,8 +628,6 @@ class LocalStatusClient:
         motd = _extract_motd_from_json(data.get("description", {}) or {})
 
         # favicon 是 base64 编码的图片数据，前端不需要，不再解析。
-        software = str(data.get("software") or data.get("server_mod") or "未知")
-
         # modinfo / forgeData / etc.，暂不展开。
         return ServerSnapshot(
             key=server.key,
@@ -649,10 +642,8 @@ class LocalStatusClient:
             online=online_players,
             max_players=max_players,
             players=player_names,
-            software=software,
-            map_name="未知",
             update_time=_now_text(),
-            host=f"{server.server_ip}:{server.server_port}",
+            host=format_host_port(server.server_ip, server.server_port),
             server_address=server.server_address,
             latency_ms=latency_ms,
             error=None,
@@ -745,14 +736,12 @@ class LocalStatusClient:
         def _f(idx: int) -> str:
             return fields[idx] if idx < len(fields) else ""
 
-        edition = _f(0)
         motd_line_1 = _f(1)
         protocol_str = _f(2)
         version_name = _f(3)
         online_str = _f(4)
         max_str = _f(5)
         sub_motd = _f(7)
-        game_mode = _f(8)
 
         try:
             online_players = int(online_str) if online_str else 0
@@ -767,13 +756,7 @@ class LocalStatusClient:
         motd_lines = [line for line in (motd_line_1, sub_motd) if line]
         motd = "\n".join(motd_lines)
 
-        # 显示名：优先使用游戏模式或版本名
         display_name = server.server_name
-        # software 信息：edition + game mode
-        software_parts = [edition] if edition else []
-        if game_mode:
-            software_parts.append(game_mode)
-        software = " / ".join(software_parts) if software_parts else "Bedrock"
 
         # Bedrock 协议包不直接给出玩家列表，因此保持为空。
         player_names: list[str] = []
@@ -791,20 +774,14 @@ class LocalStatusClient:
             online=online_players,
             max_players=max_players,
             players=player_names,
-            software=software,
-            map_name="未知",
             update_time=_now_text(),
-            host=f"{server.server_ip}:{server.server_port}",
+            host=format_host_port(server.server_ip, server.server_port),
             server_address=server.server_address,
             latency_ms=None,
             error=None,
         )
 
 
-def build_status_client(_legacy_flag: bool = False) -> LocalStatusClient:
-    """工厂函数：构造本地状态查询客户端。
-
-    为兼容旧代码调用签名（原本根据 use_mcbbs_api 切换 MCStatusClient / MineBBSClient），
-    保留位置参数但忽略其值。
-    """
+def build_status_client() -> LocalStatusClient:
+    """工厂函数：构造本地状态查询客户端（便于测试时替换实现）。"""
     return LocalStatusClient()

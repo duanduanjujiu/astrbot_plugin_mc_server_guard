@@ -1,4 +1,22 @@
-"""AstrBot Minecraft 多服务器监控插件（AI 修改版 v1.1.1）。
+"""AstrBot Minecraft 多服务器监控插件（AI 修改版 v1.2.0）。
+
+v1.2.0（运行时健壮性与运维改进）：
+- **通知异步化**：状态变化通知入队后由后台 worker 发送，平台不可用 / 发送慢时
+  不再阻塞监控循环（队列满时丢弃最旧通知）。
+- **/mc_reload**（管理员）：重新读取 WebUI 配置并重建监控状态，修改配置后无需
+  手动重载插件；旧的 DNS 缓存会一并清空。
+- **错误分类**：区分 DNS/SRV 解析失败与服务器不可达。解析失败只跳过本轮，
+  不再误报"已离线"。
+- **DNS 缓存**：解析结果缓存 5 分钟（失败缓存 30 秒），避免每轮轮询都查 DNS。
+- **IPv6 地址**：支持 ``[2001:db8::1]:25566`` / 裸 IPv6 字面量；旧版
+  ``server_ip`` 字段也会自动加方括号。
+- **/mc_query 并发 + 限流**：多台服务器并发探测，并加 3 秒全局冷却，
+  防止高频调用触发大量探测。
+- **ADMIN 门禁**：``/mc_start_server_monitor``、``/mc_stop_server_monitor``
+  与 reset / reload / push_* 一致，仅管理员可用。
+- **日志降噪**：已降级的失联服务器把逐次重试的 WARNING 降为 DEBUG。
+- 清理死代码（未使用的 ``software`` / ``map_name`` / ``last_success_ts`` 等），
+  延迟（``latency_ms``）现在会展示在状态消息中。
 
 v1.1.1（协议健壮性修复）：
 - 超时不再回退 Legacy Ping：Python 3.11+ 的 ``asyncio.TimeoutError`` 是
@@ -48,6 +66,7 @@ PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if PLUGIN_DIR not in sys.path:
     sys.path.insert(0, PLUGIN_DIR)
 
+from minecraft_multi_monitor.address import format_host_port
 from minecraft_multi_monitor.clients import build_status_client
 from minecraft_multi_monitor.config import (
     build_initial_states,
@@ -55,7 +74,7 @@ from minecraft_multi_monitor.config import (
     load_settings,
     parse_umo,
 )
-from minecraft_multi_monitor.models import ServerConfig, ServerSnapshot, ServerState
+from minecraft_multi_monitor.models import FetchResult, ServerConfig, ServerSnapshot, ServerState
 from minecraft_multi_monitor.monitoring import (
     DEFAULT_STATUS_CONFIRM_OFFLINE,
     DEFAULT_STATUS_CONFIRM_ONLINE,
@@ -65,11 +84,18 @@ from minecraft_multi_monitor.monitoring import (
     format_server_info,
 )
 from minecraft_multi_monitor.services import describe_target, get_hitokoto, notify
+from minecraft_multi_monitor.srv_resolver import clear_resolve_cache
 from minecraft_multi_monitor.state import (
     clear_runtime_target,
     load_runtime_target,
     save_runtime_target,
 )
+
+# 通知发送队列上限：发送失败/平台不可用时最多积压这么多条通知，超过则丢弃最旧的。
+NOTIFY_QUEUE_MAXSIZE = 100
+
+# 手动查询冷却（秒）：防止任何成员高频刷 /mc_query 触发大量探测。
+QUERY_COOLDOWN_SECONDS = 3.0
 
 
 def _command_rest(event: AstrMessageEvent) -> str:
@@ -102,6 +128,12 @@ class MyPlugin(Star):
         self.server_locks = {server.key: asyncio.Lock() for server in self.servers}
         self.status_client = build_status_client()
 
+        # 通知改为队列 + 后台 worker 异步发送：发送慢（平台不可用最长等 12s）时
+        # 不会阻塞监控循环或拖慢其他服务器的检测节拍。
+        self._notify_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=NOTIFY_QUEUE_MAXSIZE)
+        self._notify_task: asyncio.Task | None = None
+        self._last_query_at = 0.0
+
         logger.info(
             "Minecraft 多服务器监控插件已加载，"
             f"推送目标: {self._target_desc()}, 自动启动: {self.settings.enable_auto_monitor}, "
@@ -117,7 +149,9 @@ class MyPlugin(Star):
     async def terminate(self):
         """停止插件：取消延迟启动 + 主监控任务，避免残留僵尸协程。"""
         self._terminated = True
-        pending = [t for t in (self._delayed_start_task, self.task) if t is not None and not t.done()]
+        pending = [
+            t for t in (self._delayed_start_task, self.task, self._notify_task) if t is not None and not t.done()
+        ]
         for t in pending:
             t.cancel()
         for t in pending:
@@ -177,53 +211,67 @@ class MyPlugin(Star):
                 exc_info=exc,
             )
 
-    async def _fetch_server_data(self, server: ServerConfig, source: str):
-        """拉取单台服务器的状态。
+    async def _fetch_server_data(self, server: ServerConfig, source: str, *, quiet: bool = False) -> FetchResult:
+        """拉取单台服务器的状态，返回 :class:`FetchResult`。
 
-        当本地 SLP 探测失败（超时、连接拒绝、协议错误等）时，本地直连意味着
-        服务器大概率已离线，因此这里直接构造一个 status="offline" 的 snapshot
-        以便 detect_changes 能（在连续失败确认后）识别"在线 → 离线"的事件。
+        - 成功：``snapshot`` 为在线快照；
+        - 失败但属于"服务器不可达"（超时 / 网络错误 / 协议异常）：合成一个
+          ``status="offline"`` 的快照，供 detect_changes 在连续确认后上报"已离线"；
+        - 地址解析失败（DNS / SRV）：``snapshot`` 为 None、``error_kind="resolve"``，
+          调用方应跳过本轮——本机 DNS 故障不代表服务器离线。
+
+        Args:
+            quiet: 降级中的服务器传 True，把逐次重试的 WARNING 日志降到 DEBUG。
         """
         lock = self.server_locks.setdefault(server.key, asyncio.Lock())
         async with lock:
-            snapshot = await self.status_client.fetch_status(server, source)
-            if snapshot is not None:
-                return snapshot
+            result = await self.status_client.fetch_status(server, source, quiet=quiet)
 
-            now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            return ServerSnapshot(
-                key=server.key,
-                name=server.server_name,
-                server_ip=server.server_ip,
-                server_port=server.server_port,
-                server_type=server.server_type,
-                status="offline",
-                motd="",
-                version="未知",
-                protocol="未知",
-                online=0,
-                max_players=0,
-                players=[],
-                software="未知",
-                map_name="未知",
-                update_time=now_text,
-                host=f"{server.server_ip}:{server.server_port}",
-                server_address=server.server_address,
-                latency_ms=None,
-                error="本地 SLP 探测失败（超时或连接被拒绝）",
-            )
+        if result.snapshot is not None or result.error_kind == "resolve":
+            return result
+
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        snapshot = ServerSnapshot(
+            key=server.key,
+            name=server.server_name,
+            server_ip=server.server_ip,
+            server_port=server.server_port,
+            server_type=server.server_type,
+            status="offline",
+            motd="",
+            version="未知",
+            protocol="未知",
+            online=0,
+            max_players=0,
+            players=[],
+            update_time=now_text,
+            host=format_host_port(server.server_ip, server.server_port),
+            server_address=server.server_address,
+            latency_ms=None,
+            error=result.error_message or "本地探测失败",
+        )
+        return FetchResult(snapshot, result.error_kind, result.error_message)
 
     async def get_all_server_status_text(self) -> str:
         if not self.servers:
             return "❌ 当前没有启用的服务器配置"
 
+        # 并发探测：多台服务器（含离线服务器）不会互相排队等待。
+        servers = list(self.servers)
+        results = await asyncio.gather(
+            *(self._fetch_server_data(server, source="manual") for server in servers),
+            return_exceptions=True,
+        )
+
         blocks: list[str] = []
-        for index, server in enumerate(self.servers, start=1):
-            snapshot = await self._fetch_server_data(server, source="manual")
-            blocks.append(
-                f"===== {index}. {server.server_name} =====\n"
-                f"{format_server_info(snapshot, self.settings.display_options)}"
-            )
+        for index, (server, result) in enumerate(zip(servers, results), start=1):
+            if isinstance(result, BaseException):
+                detail = f"❌ 查询异常：{result!r}"
+            elif result.snapshot is None:
+                detail = f"❌ 无法取值：{result.error_message or result.error_kind or '未知错误'}"
+            else:
+                detail = format_server_info(result.snapshot, self.settings.display_options)
+            blocks.append(f"===== {index}. {server.server_name} =====\n{detail}")
         return "\n\n".join(blocks)
 
     async def monitor_loop(self):
@@ -268,15 +316,21 @@ class MyPlugin(Star):
             return
         state.last_check_ts = now
 
-        snapshot = await self._fetch_server_data(server, source="monitor")
-        if snapshot is None:
-            logger.warning(f"[monitor] [{server.server_name}] 本次未获取到服务器状态")
+        degraded = state.consecutive_failures >= DEGRADE_AFTER_FAILURES
+        result = await self._fetch_server_data(server, source="monitor", quiet=degraded)
+        if result.snapshot is None:
+            # 地址解析失败不代表服务器离线（可能是本机 DNS 故障）：跳过本轮，
+            # 不修改上下线状态，也不计入 consecutive_failures。
+            logger.warning(
+                f"[monitor] [{server.server_name}] 地址解析失败，跳过本轮（不计入掉线）: "
+                f"{result.error_message or result.error_kind}"
+            )
             return
 
+        snapshot = result.snapshot
         # 健康统计：任何一次拉取成功/失败都计入（用于降频与上下线判定）
         if snapshot.status == "online":
             state.consecutive_failures = 0
-            state.last_success_ts = now
         else:
             state.consecutive_failures += 1
 
@@ -310,9 +364,8 @@ class MyPlugin(Star):
             if hitokoto:
                 final_message += f"\n\n💬 {hitokoto}"
 
-        sent = await self._send_notification(final_message)
-        if not sent:
-            logger.error(f"[monitor] [{server.server_name}] 状态变化已识别，但通知发送失败")
+        # 入队后立即返回：发送由后台 worker 负责，避免平台发送慢拖住监控循环。
+        self._queue_notification(final_message)
 
     async def _send_notification(self, final_text: str) -> bool:
         umo = self._effective_umo()
@@ -321,6 +374,61 @@ class MyPlugin(Star):
         if not sent:
             logger.error(f"通知发送失败，当前推送目标: {describe_target(umo=umo, group_id=group_id)}")
         return sent
+
+    # ------------------------------------------------------------------
+    # 通知队列（异步发送）
+    # ------------------------------------------------------------------
+
+    def _ensure_notify_worker(self) -> None:
+        """确保后台通知 worker 正在运行。"""
+        if self._notify_task is None or self._notify_task.done():
+            self._notify_task = asyncio.create_task(self._notify_worker())
+            self._notify_task.add_done_callback(self._on_notify_task_done)
+
+    def _on_notify_task_done(self, fut: asyncio.Task) -> None:
+        if fut.cancelled():
+            return
+        try:
+            exc = fut.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            logger.error(f"Minecraft 通知 worker 异常退出: {exc!r}", exc_info=exc)
+
+    async def _notify_worker(self) -> None:
+        """串行消费通知队列；发送失败只记日志，不影响监控循环。"""
+        while True:
+            text = await self._notify_queue.get()
+            try:
+                sent = await self._send_notification(text)
+                if not sent:
+                    logger.error("通知发送失败（已丢弃该条，监控循环不受影响）")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(f"通知发送异常: {exc!r}", exc_info=True)
+            finally:
+                self._notify_queue.task_done()
+
+    def _queue_notification(self, text: str) -> None:
+        """把通知放入发送队列；队列满时丢弃最旧的一条，保留最新状态。"""
+        self._ensure_notify_worker()
+        try:
+            self._notify_queue.put_nowait(text)
+            return
+        except asyncio.QueueFull:
+            pass
+
+        try:
+            dropped = self._notify_queue.get_nowait()
+            self._notify_queue.task_done()
+            logger.warning(f"通知队列已满，丢弃最旧通知: {dropped[:50]}...")
+        except asyncio.QueueEmpty:
+            pass
+        try:
+            self._notify_queue.put_nowait(text)
+        except asyncio.QueueFull:
+            logger.error("通知队列已满，最新通知也未能入队，已丢弃")
 
     async def _send_test(self, *, umo: str | None, group_id: str | None, cause: str) -> str:
         """设置目标后立即发一条测试消息，返回给用户看的回执文本。"""
@@ -346,8 +454,10 @@ class MyPlugin(Star):
     # 聊天命令
     # ------------------------------------------------------------------
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("mc_start_server_monitor")
     async def start_server_monitor_task(self, event: AstrMessageEvent):
+        """启动监控任务（管理员）。"""
         if not self.servers:
             yield event.plain_result("❌ 当前没有启用的服务器配置，请先在 WebUI 中配置 server_entries")
             return
@@ -369,8 +479,10 @@ class MyPlugin(Star):
         self.task.add_done_callback(self._on_monitor_task_done)
         yield event.plain_result(f"✅ 多服务器监控已启动，当前监控 {len(self.servers)} 台服务器")
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("mc_stop_server_monitor")
     async def stop_server_monitor_task(self, event: AstrMessageEvent):
+        """停止监控任务（管理员）。"""
         if self.task and not self.task.done():
             self.task.cancel()
             try:
@@ -383,6 +495,14 @@ class MyPlugin(Star):
 
     @filter.command("mc_query")
     async def query_server_status(self, event: AstrMessageEvent):
+        """立即查询全部服务器状态（对所有用户开放，带全局冷却）。"""
+        now = asyncio.get_running_loop().time()
+        remaining = QUERY_COOLDOWN_SECONDS - (now - self._last_query_at)
+        if remaining > 0:
+            yield event.plain_result(f"⏳ 查询太频繁，请 {int(remaining) + 1} 秒后再试")
+            return
+        self._last_query_at = now
+
         text = await self.get_all_server_status_text()
         if self.settings.display_options.show_hitokoto:
             hitokoto = await get_hitokoto()
@@ -490,6 +610,50 @@ class MyPlugin(Star):
             yield event.plain_result(
                 f"❌ 测试消息发送失败（请查看 AstrBot 日志）。\n当前推送目标: {self._target_desc()}"
             )
+
+    # ------------------------------------------------------------------
+    # 配置重载
+    # ------------------------------------------------------------------
+
+    def _reload_runtime(self) -> None:
+        """从 ``self.config`` 重新加载设置 / 服务器列表，并重建运行时状态。"""
+        self.settings = load_settings(self.config)
+        self.servers = load_servers_from_config(self.config, self.settings.global_check_interval)
+        self.server_states = build_initial_states(self.servers)
+        self.server_locks = {server.key: asyncio.Lock() for server in self.servers}
+        self.status_client = build_status_client()
+        # 配置可能改了地址，清空 DNS 缓存让新地址立即生效
+        clear_resolve_cache()
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("mc_reload")
+    async def reload_config(self, event: AstrMessageEvent):
+        """重新读取 WebUI 配置并重建监控状态（管理员）。"""
+        was_running = self.task is not None and not self.task.done()
+        if was_running:
+            self.task.cancel()
+            try:
+                await asyncio.wait_for(self.task, timeout=3.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+            except Exception as exc:
+                logger.warning(f"mc_reload: 停止旧监控任务时异常: {exc!r}")
+            self.task = None
+
+        self._reload_runtime()
+
+        if was_running and self.servers:
+            self.task = asyncio.create_task(self.monitor_loop())
+            self.task.add_done_callback(self._on_monitor_task_done)
+
+        status = "已自动重启监控" if was_running and self.servers else "监控当前未运行"
+        yield event.plain_result(
+            f"✅ 配置已重新加载。\n"
+            f"服务器数: {len(self.servers)}\n"
+            f"检测间隔: {self.settings.global_check_interval}s\n"
+            f"推送目标: {self._target_desc()}\n"
+            f"{status}（如修改了 WebUI 配置且此处未生效，请在插件页重载插件）"
+        )
 
     def _target_usage_text(self) -> str:
         return (

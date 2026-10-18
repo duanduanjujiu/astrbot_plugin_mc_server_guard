@@ -4,6 +4,38 @@
 
 ---
 
+## [1.2.0] - 2026-10
+
+### 🚀 运行时健壮性与运维改进
+
+- **通知发送异步化**：状态变化通知先入队，由后台 worker 串行发送。此前
+  `notify()` 会在监控循环里同步 await（无可用平台时 `wait_for_platform_ready`
+  最长等 12s），平台故障会拖慢整轮检测。队列上限 100 条，满时丢弃最旧通知。
+- **新增 `/mc_reload`（管理员）**：重新读取 WebUI 配置并重建服务器列表 / 状态 /
+  锁，若监控在运行则自动重启；同时清空 DNS 解析缓存。修改配置后不必再重载插件。
+- **区分"解析失败"与"服务器离线"**：新增 `FetchResult` 错误分类
+  （`resolve` / `timeout` / `network` / `protocol`）。DNS 或 SRV 解析失败只跳过
+  本轮并记 warning，不再计入 `consecutive_failures`，避免本机 DNS 故障误报离线。
+- **DNS 解析缓存**：`resolve_server_target` 增加 TTL 缓存（成功 300s、失败 30s），
+  避免每轮轮询都重复解析 A/AAAA/SRV 记录。
+- **IPv6 支持**：新增 `minecraft_multi_monitor/address.py`，统一处理
+  `[2001:db8::1]:25566`、裸 IPv6 字面量与 `host:port`；旧版 `server_ip` 字段
+  在拼接时自动补方括号，修复 `::1` 被错误拆成 `(":", 1)` 的问题。
+- **`/mc_query` 并发 + 全局冷却**：多台服务器并发探测，并加 3 秒全局冷却，
+  防止任何成员高频刷查询触发大量探测（查询仍对所有用户开放）。
+- **ADMIN 门禁**：`/mc_start_server_monitor`、`/mc_stop_server_monitor` 现在与
+  reset / reload / push_* 一致，仅管理员可调用。
+- **日志降噪**：已降级的失联服务器把逐次重试的 WARNING 降到 DEBUG。
+- **延迟展示**：Java SLP 探测到的 `latency_ms` 现在会显示为「📶 延迟」。
+- **清理死代码**：移除未使用的 `software` / `map_name` 字段、`last_success_ts`、
+  `RuntimeTarget.is_empty` 与未被使用的 `_monitor_tick` 空分支；`FetchResult`
+  统一了拉取结果的返回形态。
+- **测试**：单元测试增至 55 个用例，新增通知队列、错误分类、配置重载、
+  IPv6、DNS 缓存、查询限流等覆盖。
+- **CI**：新增 `.github/workflows/ci.yml`（ruff + unittest，Python 3.10/3.12）。
+
+---
+
 ## [1.1.1] - 2026-10
 
 ### 🐛 协议健壮性修复

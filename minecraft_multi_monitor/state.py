@@ -35,10 +35,6 @@ class RuntimeTarget:
     umo: str | None = None
     group_id: str | None = None
 
-    @property
-    def is_empty(self) -> bool:
-        return not self.umo and not self.group_id
-
 
 def _state_path() -> Path | None:
     """返回 state 文件路径；找不到 data 目录时返回 None（退化为不持久化）。"""

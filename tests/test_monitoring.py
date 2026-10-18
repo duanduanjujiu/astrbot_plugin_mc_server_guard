@@ -51,8 +51,6 @@ def _snapshot(
         online=online,
         max_players=100,
         players=players or [],
-        software="未知",
-        map_name="未知",
         update_time="2026-01-01 00:00:00",
     )
 
@@ -143,6 +141,12 @@ class FormatServerInfoTest(unittest.TestCase):
         snapshot.error = "连接超时"
         text = format_server_info(snapshot, DisplayOptions())
         self.assertIn("连接超时", text)
+
+    def test_latency_is_displayed_when_present(self):
+        snapshot = _snapshot("online")
+        snapshot.latency_ms = 42
+        text = format_server_info(snapshot, DisplayOptions())
+        self.assertIn("42 ms", text)
 
     def test_player_list_truncated(self):
         players = [f"player{i}" for i in range(10)]

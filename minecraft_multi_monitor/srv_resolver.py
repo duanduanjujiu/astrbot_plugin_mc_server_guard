@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import time
 from dataclasses import dataclass
 
 import dns.asyncresolver
@@ -15,6 +16,22 @@ import dns.exception
 import dns.rdatatype
 import dns.resolver
 from astrbot.api import logger
+
+from .address import is_ip_literal, split_host_port
+
+# 解析结果缓存（秒）：监控每轮都要探测，缓存可避免每轮都做一次 DNS 查询。
+# 成功结果缓存 5 分钟（兼顾动态 DNS 变更），失败结果短缓存 30 秒（避免故障期
+# 反复等待 DNS 超时，但又能在恢复后较快重试）。
+RESOLVE_CACHE_TTL = 300.0
+NEGATIVE_CACHE_TTL = 30.0
+
+# key: (address, fallback_port) → (expires_at, (ip, port, used_srv) | None)
+_resolve_cache: dict[tuple[str, int], tuple[float, tuple[str, int, bool] | None]] = {}
+
+
+def clear_resolve_cache() -> None:
+    """清空解析缓存（插件重载配置后调用，让修改立即生效）。"""
+    _resolve_cache.clear()
 
 
 @dataclass(slots=True)
@@ -165,20 +182,22 @@ async def resolve_server_target(
     fallback_port: int,
     *,
     timeout: float = 5.0,
+    use_cache: bool = True,
 ) -> tuple[str, int, bool]:
-    """统一的目标服务器解析入口。
+    """统一的目标服务器解析入口（带 TTL 缓存）。
 
     根据 address 的形式选择不同解析路径：
       - SRV 记录名（以 `_` 开头）：查 SRV → 主机名 → IP
-      - 已经是 IP 字面量：直接返回 (ip, fallback_port, False)
-      - 普通域名：解析 A/AAAA 记录 → IP
+      - 已经是 IP 字面量（IPv4 / 带方括号或不带方括号的 IPv6）：直接返回
+      - 普通域名：解析 A/AAAA 记录 → IP；无 A 记录时再尝试 SRV
 
     Args:
         address: 用户填的 server_address 字符串，可包含 :port 后缀
             （对 SRV 路径该 :port 会被忽略）。
-        fallback_port: 当用户没指定端口时使用的端口（通常来自配置或默认值 25565）。
+        fallback_port: 当用户没指定端口时使用的端口（Java 25565 / Bedrock 19132）。
             对 SRV 路径该参数被忽略（端口由 SRV 记录决定）。
         timeout: DNS 解析超时。
+        use_cache: 是否使用缓存（测试或强制刷新时可关闭）。
 
     Returns:
         (ip, port, used_srv) 三元组：
@@ -192,53 +211,54 @@ async def resolve_server_target(
     if not address:
         return "", 0, False
 
-    # 0) 拆分可选的 :port 后缀（除 SRV 路径外）
-    host_part = address
-    explicit_port: int | None = None
-    if ":" in address and not address.startswith("_"):
-        host_part, port_str = address.rsplit(":", 1)
-        host_part = host_part.strip().rstrip(".")
-        try:
-            p = int(port_str)
-            if 1 <= p <= 65535:
-                explicit_port = p
-        except ValueError:
-            explicit_port = None
-        if explicit_port is None:
-            # 端口无效时整体视为无效
-            return "", 0, False
+    cache_key = (address.lower(), fallback_port)
+    if use_cache:
+        cached = _resolve_cache.get(cache_key)
+        if cached is not None and cached[0] > time.monotonic():
+            return cached[1] if cached[1] is not None else ("", 0, False)
 
-    port_to_use = explicit_port if explicit_port is not None else fallback_port
+    result = await _resolve_server_target_uncached(address, fallback_port, timeout=timeout)
 
+    if use_cache:
+        ttl = RESOLVE_CACHE_TTL if result[0] else NEGATIVE_CACHE_TTL
+        _resolve_cache[cache_key] = (time.monotonic() + ttl, result if result[0] else None)
+
+    return result
+
+
+async def _resolve_server_target_uncached(
+    address: str,
+    fallback_port: int,
+    *,
+    timeout: float,
+) -> tuple[str, int, bool]:
+    """实际的解析逻辑（不带缓存），参数含义见 ``resolve_server_target``。"""
     # 1) SRV 记录路径（端口由 SRV 决定，忽略用户填的 :port）
     if address.startswith("_"):
-        resolved = await resolve_srv_with_ip(address, timeout=timeout)
+        host_part = address.rsplit(":", 1)[0].strip() if ":" in address else address
+        if not host_part:
+            return "", 0, False
+        resolved = await resolve_srv_with_ip(host_part, timeout=timeout)
         if resolved is None:
             return "", 0, False
         ip, port = resolved
         return ip, port, True
 
-    if not host_part:
+    # 2) 拆分 host / port（支持 IPv6 方括号写法与裸 IPv6 字面量）
+    parsed = split_host_port(address, default_port=fallback_port)
+    if parsed is None:
         return "", 0, False
+    host_part, port_to_use = parsed
 
-    # 2) 已经是 IPv4/IPv6 字面量
-    try:
-        socket.inet_pton(socket.AF_INET, host_part)
+    # 3) 已经是 IPv4/IPv6 字面量
+    if is_ip_literal(host_part):
         return host_part, port_to_use, False
-    except OSError:
-        pass
-    try:
-        socket.inet_pton(socket.AF_INET6, host_part)
-        return host_part, port_to_use, False
-    except OSError:
-        pass
 
-    # 3) 普通主机名 → 解析 A/AAAA 记录
+    # 4) 普通主机名 → 解析 A/AAAA 记录
     ip = await resolve_host(host_part, timeout=timeout)
     if ip is None:
-        # 4) 用户填的可能是 Minecraft 标准域名（如 play.example.com），但域名本身
-        #    没有 A 记录（典型情况：通过 SRV 指向内网/FRP 后端）。
-        #    自动尝试 SRV 解析（补全 _minecraft._tcp. 前缀）。
+        # 5) 域名本身没有 A 记录（典型情况：通过 SRV 指向内网/FRP 后端），
+        #    自动尝试 Minecraft 标准 SRV 记录（补全 _minecraft._tcp. 前缀）。
         srv_name = f"_minecraft._tcp.{host_part}"
         srv_resolved = await resolve_srv_with_ip(srv_name, timeout=timeout)
         if srv_resolved is not None:

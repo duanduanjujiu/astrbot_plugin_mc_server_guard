@@ -19,7 +19,12 @@ def _make_module(name: str) -> types.ModuleType:
 
 
 def install() -> None:
-    """安装 stub（幂等）。真实 AstrBot 可导入时不做任何事。"""
+    """安装 stub（幂等）。真实 AstrBot / aiohttp 可导入时不做任何事。"""
+    _install_astrbot_stub()
+    _install_aiohttp_stub()
+
+
+def _install_astrbot_stub() -> None:
     if "astrbot" in sys.modules:
         return
     if importlib.util.find_spec("astrbot") is not None:
@@ -113,3 +118,32 @@ def install() -> None:
     sys.modules["astrbot.api.event"] = event
     sys.modules["astrbot.api.event.filter"] = filter_pkg
     sys.modules["astrbot.api.star"] = star
+
+
+def _install_aiohttp_stub() -> None:
+    """aiohttp 仅被 "一言" 功能使用；测试环境没装时注入最小 stub。"""
+    if "aiohttp" in sys.modules:
+        return
+    if importlib.util.find_spec("aiohttp") is not None:
+        return
+
+    aiohttp = _make_module("aiohttp")
+
+    class ClientTimeout:
+        def __init__(self, total=None, **kwargs):
+            self.total = total
+            self.kwargs = kwargs
+
+    class ClientSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+        async def get(self, *args, **kwargs):
+            raise RuntimeError("aiohttp stub: 测试中禁止真实网络请求")
+
+    aiohttp.ClientTimeout = ClientTimeout
+    aiohttp.ClientSession = ClientSession
+    sys.modules["aiohttp"] = aiohttp

@@ -1,4 +1,4 @@
-"""clients.py 协议解析与读取行为测试（不依赖真实 Minecraft 服务器）。"""
+"""clients.py 协议解析、读取行为与错误分类测试（不依赖真实 Minecraft 服务器）。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest import mock
 
 import _support  # noqa: F401  (安装 stub + 修正 sys.path)
 
-from minecraft_multi_monitor import clients
+from minecraft_multi_monitor import clients, srv_resolver
 from minecraft_multi_monitor.models import ServerConfig, ServerSnapshot
 
 
@@ -45,6 +45,24 @@ def _legacy_response(
     max_players: str = "20",
 ) -> bytes:
     return b"\xff" + _legacy_response_body(protocol, version, motd, online, max_players)
+
+
+def _expected_snapshot() -> ServerSnapshot:
+    return ServerSnapshot(
+        key="test",
+        name="test-server",
+        server_ip="127.0.0.1",
+        server_port=25565,
+        server_type="java",
+        status="online",
+        motd="legacy",
+        version="1.6.4",
+        protocol="78",
+        online=0,
+        max_players=20,
+        players=[],
+        update_time="2026-01-01 00:00:00",
+    )
 
 
 class LegacyPayloadParseTest(unittest.TestCase):
@@ -114,29 +132,14 @@ class JavaFallbackTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(clients, "RETRY_BACKOFF", 0):
             result = await client.fetch_status(_make_server(), "test")
 
-        self.assertIsNone(result)
+        self.assertIsNone(result.snapshot)
+        self.assertEqual(result.error_kind, "timeout")
         self.assertEqual(calls["slp"], clients.RETRY_COUNT)
         self.assertEqual(calls["legacy"], 0)
 
     async def test_protocol_error_still_falls_back_to_legacy(self):
         """非超时错误（如响应包异常）仍应回退到 Legacy Ping。"""
-        expected = ServerSnapshot(
-            key="test",
-            name="test-server",
-            server_ip="127.0.0.1",
-            server_port=25565,
-            server_type="java",
-            status="online",
-            motd="legacy",
-            version="1.6.4",
-            protocol="78",
-            online=0,
-            max_players=20,
-            players=[],
-            software="未知",
-            map_name="未知",
-            update_time="2026-01-01 00:00:00",
-        )
+        expected = _expected_snapshot()
         calls = {"slp": 0, "legacy": 0}
 
         async def fake_slp(*args, **kwargs):
@@ -154,9 +157,57 @@ class JavaFallbackTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(clients, "RETRY_BACKOFF", 0):
             result = await client.fetch_status(_make_server(), "test")
 
-        self.assertIs(result, expected)
+        self.assertIs(result.snapshot, expected)
+        self.assertTrue(result.ok)
+        self.assertIsNone(result.error_kind)
         self.assertEqual(calls["slp"], 1)
         self.assertEqual(calls["legacy"], 1)
+
+
+class ErrorClassificationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_connection_error_is_network(self):
+        async def fake_slp(*args, **kwargs):
+            raise ConnectionRefusedError("refused")
+
+        client = clients.LocalStatusClient(timeout=0.05)
+        client._fetch_java_slp = fake_slp  # type: ignore[method-assign]
+        client._fetch_java_legacy = fake_slp  # type: ignore[method-assign]
+
+        with mock.patch.object(clients, "RETRY_BACKOFF", 0):
+            result = await client.fetch_status(_make_server(), "test")
+
+        self.assertIsNone(result.snapshot)
+        self.assertEqual(result.error_kind, "network")
+
+    async def test_resolve_failure_is_reported_separately(self):
+        """DNS/SRV 解析失败应单独归类，不能当成服务器离线。"""
+        server = _make_server()
+        server.server_ip = ""
+        server.server_address = "missing.invalid"
+
+        async def fake_resolve(*args, **kwargs):
+            return "", 0, False
+
+        client = clients.LocalStatusClient(timeout=0.05)
+        with mock.patch.object(srv_resolver, "resolve_server_target", fake_resolve):
+            result = await client.fetch_status(server, "test")
+
+        self.assertIsNone(result.snapshot)
+        self.assertEqual(result.error_kind, "resolve")
+        self.assertIn("missing.invalid", result.error_message or "")
+
+    async def test_quiet_mode_is_accepted(self):
+        async def fake_slp(*args, **kwargs):
+            raise asyncio.TimeoutError()
+
+        client = clients.LocalStatusClient(timeout=0.05)
+        client._fetch_java_slp = fake_slp  # type: ignore[method-assign]
+        client._fetch_java_legacy = fake_slp  # type: ignore[method-assign]
+
+        with mock.patch.object(clients, "RETRY_BACKOFF", 0):
+            result = await client.fetch_status(_make_server(), "test", quiet=True)
+
+        self.assertEqual(result.error_kind, "timeout")
 
 
 if __name__ == "__main__":
